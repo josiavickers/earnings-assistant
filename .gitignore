@@ -1,0 +1,20 @@
+# Secrets — never commit
+.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+*.egg-info/
+
+# Database and uploads (local data, not source code)
+pdfs.db
+pdfs.db-journal
+uploads/
+
+# OS
+.DS_Store
+Thumbs.db
