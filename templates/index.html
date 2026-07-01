@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>PDF Upload</title>
+  <title>Earnings Report Assistant</title>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -29,7 +29,7 @@
       font-size: 0.95rem;
     }
 
-    .container { max-width: 900px; margin: 0 auto; }
+    .container { max-width: 1100px; margin: 0 auto; }
 
     /* Drop zone */
     #drop-zone {
@@ -42,22 +42,13 @@
       transition: background 0.2s, border-color 0.2s;
       margin-bottom: 1.5rem;
     }
-    #drop-zone.drag-over {
-      background: #eff6ff;
-      border-color: #3b82f6;
-    }
-    #drop-zone svg {
-      margin-bottom: 1rem;
-      color: #93c5fd;
-    }
-    #drop-zone p {
-      color: #6b7280;
-      font-size: 1rem;
-    }
+    #drop-zone.drag-over { background: #eff6ff; border-color: #3b82f6; }
+    #drop-zone svg { margin-bottom: 1rem; color: #93c5fd; }
+    #drop-zone p { color: #6b7280; font-size: 1rem; }
     #drop-zone strong { color: #3b82f6; }
     #file-input { display: none; }
 
-    /* Toast */
+    /* Toasts */
     #toast-container {
       position: fixed;
       bottom: 1.5rem;
@@ -74,7 +65,7 @@
       font-weight: 500;
       box-shadow: 0 4px 12px rgba(0,0,0,0.12);
       animation: slide-in 0.25s ease;
-      max-width: 320px;
+      max-width: 340px;
     }
     .toast.success { background: #dcfce7; color: #166534; }
     .toast.error   { background: #fee2e2; color: #991b1b; }
@@ -84,15 +75,12 @@
       to   { opacity: 1; transform: translateY(0); }
     }
 
-    /* Table card */
+    /* Card */
     .card {
       background: #fff;
       border-radius: 16px;
       box-shadow: 0 1px 4px rgba(0,0,0,0.08);
       overflow: hidden;
-    }
-    #table-wrap {
-      overflow-x: auto;
     }
     .card-header {
       padding: 1rem 1.5rem;
@@ -111,6 +99,8 @@
       font-weight: 600;
     }
 
+    /* Table */
+    #table-wrap { overflow-x: auto; }
     table {
       width: 100%;
       border-collapse: collapse;
@@ -122,9 +112,10 @@
       padding: 0.75rem 1rem;
       font-weight: 600;
       color: #64748b;
-      font-size: 0.8rem;
+      font-size: 0.75rem;
       text-transform: uppercase;
       letter-spacing: 0.05em;
+      white-space: nowrap;
     }
     td {
       padding: 0.75rem 1rem;
@@ -133,10 +124,22 @@
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
-      max-width: 200px;
+      max-width: 180px;
     }
-    tr:hover td { background: #f9fafb; }
+    tr.summary-row:hover td { background: #f9fafb; }
 
+    /* Sticky delete column */
+    td.col-delete, th.col-delete {
+      position: sticky;
+      right: 0;
+      background: #fff;
+      box-shadow: -2px 0 6px rgba(0,0,0,0.06);
+      max-width: unset;
+    }
+    thead th.col-delete { background: #f8fafc; }
+    tr.summary-row:hover td.col-delete { background: #f9fafb; }
+
+    /* Buttons */
     .btn-delete {
       background: none;
       border: none;
@@ -149,16 +152,115 @@
       transition: background 0.15s;
     }
     .btn-delete:hover { background: #fee2e2; }
-    td.col-delete, th.col-delete {
-      position: sticky;
-      right: 0;
-      background: #fff;
-      box-shadow: -2px 0 6px rgba(0,0,0,0.06);
-      max-width: unset;
-    }
-    thead th.col-delete { background: #f8fafc; }
-    tr:hover td.col-delete { background: #f9fafb; }
 
+    .btn-expand {
+      background: none;
+      border: none;
+      color: #6b7280;
+      cursor: pointer;
+      padding: 0.25rem 0.4rem;
+      border-radius: 6px;
+      font-size: 0.75rem;
+      transition: background 0.15s, color 0.15s;
+      line-height: 1;
+    }
+    .btn-expand:hover { background: #f1f5f9; color: #1a1a2e; }
+    .btn-expand.open { color: #3b82f6; }
+
+    /* Confidence pill */
+    .conf {
+      display: inline-block;
+      padding: 0.15rem 0.5rem;
+      border-radius: 99px;
+      font-size: 0.75rem;
+      font-weight: 600;
+    }
+    .conf.high   { background: #dcfce7; color: #166534; }
+    .conf.medium { background: #fef9c3; color: #854d0e; }
+    .conf.low    { background: #fee2e2; color: #991b1b; }
+
+    /* Analysis error indicator */
+    .err-icon { color: #ef4444; cursor: default; }
+
+    /* Validation warning badge on summary row */
+    .warn-badge {
+      display: inline-block;
+      background: #fef9c3;
+      color: #854d0e;
+      border-radius: 99px;
+      padding: 0.1rem 0.45rem;
+      font-size: 0.7rem;
+      font-weight: 700;
+      margin-left: 0.3rem;
+      vertical-align: middle;
+      cursor: default;
+    }
+
+    /* Expandable detail row */
+    .detail-row td {
+      background: #f8fafc !important;
+      padding: 0 !important;
+      border-top: none !important;
+    }
+    .detail-inner {
+      padding: 1rem 1.5rem 1.25rem;
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 1rem;
+      border-top: 2px solid #e0f2fe;
+    }
+    .detail-inner.error-detail {
+      grid-template-columns: 1fr;
+    }
+    .detail-block h4 {
+      font-size: 0.75rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: #64748b;
+      margin-bottom: 0.4rem;
+    }
+    .detail-block p {
+      font-size: 0.875rem;
+      color: #374151;
+      white-space: normal;
+      line-height: 1.5;
+    }
+    .detail-block p.na { color: #9ca3af; font-style: italic; }
+
+    /* Validation warnings block inside detail row */
+    .warnings-block {
+      grid-column: 1 / -1;
+      border-top: 1px solid #fde68a;
+      margin-top: 0.5rem;
+      padding-top: 0.75rem;
+    }
+    .warnings-block h4 {
+      font-size: 0.75rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: #92400e;
+      margin-bottom: 0.5rem;
+    }
+    .warnings-block ul {
+      list-style: none;
+      display: flex;
+      flex-direction: column;
+      gap: 0.3rem;
+    }
+    .warnings-block li {
+      font-size: 0.85rem;
+      color: #78350f;
+      background: #fef9c3;
+      border-radius: 6px;
+      padding: 0.35rem 0.65rem;
+    }
+    .warnings-block li::before {
+      content: "⚠ ";
+    }
+
+    /* Empty state */
     .empty-state {
       text-align: center;
       padding: 3rem;
@@ -166,16 +268,22 @@
       font-size: 0.95rem;
     }
 
-    /* Upload progress row */
-    .progress-row td {
-      background: #f0f9ff;
+    /* Progress/analysing row */
+    .progress-row > td {
+      background: #f0f9ff !important;
+      max-width: unset;
+      white-space: normal;
+    }
+    .progress-label {
+      font-size: 0.875rem;
+      color: #374151;
+      margin-bottom: 6px;
     }
     .progress-bar-wrap {
       height: 6px;
       background: #dbeafe;
       border-radius: 99px;
       overflow: hidden;
-      margin-top: 4px;
     }
     .progress-bar {
       height: 100%;
@@ -183,12 +291,29 @@
       border-radius: 99px;
       transition: width 0.2s;
     }
+    .analysing-label {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      font-size: 0.875rem;
+      color: #374151;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .spinner {
+      width: 14px;
+      height: 14px;
+      border: 2px solid #bfdbfe;
+      border-top-color: #3b82f6;
+      border-radius: 50%;
+      animation: spin 0.7s linear infinite;
+      flex-shrink: 0;
+    }
   </style>
 </head>
 <body>
   <div class="container">
     <h1>Earnings Report Assistant</h1>
-    <p class="subtitle">Drop PDFs below</p>
+    <p class="subtitle">Drop quarterly earnings PDFs — metadata and GPT-4o-mini analysis are saved automatically.</p>
 
     <div id="drop-zone">
       <svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24">
@@ -213,9 +338,19 @@
               <th>Filename</th>
               <th>Size</th>
               <th>Pages</th>
-              <th>Title</th>
-              <th>Author</th>
+              <th>Company</th>
+              <th>Quarter</th>
+              <th>FY</th>
+              <th>Revenue (M)</th>
+              <th>PBT (M)</th>
+              <th>Currency</th>
+              <th>Confidence</th>
+              <th>Rev QoQ%</th>
+              <th>Rev YoY%</th>
+              <th>PBT QoQ%</th>
+              <th>PBT YoY%</th>
               <th>Uploaded</th>
+              <th></th>
               <th class="col-delete"></th>
             </tr>
           </thead>
@@ -228,12 +363,13 @@
   <div id="toast-container"></div>
 
   <script>
-    const dropZone  = document.getElementById("drop-zone");
-    const fileInput = document.getElementById("file-input");
-    const tbody     = document.getElementById("pdf-tbody");
-    const table     = document.getElementById("pdf-table");
-    const emptyState= document.getElementById("empty-state");
-    const badge     = document.getElementById("count-badge");
+    const dropZone   = document.getElementById("drop-zone");
+    const fileInput  = document.getElementById("file-input");
+    const tbody      = document.getElementById("pdf-tbody");
+    const table      = document.getElementById("pdf-table");
+    const emptyState = document.getElementById("empty-state");
+    const badge      = document.getElementById("count-badge");
+    const TOTAL_COLS = 18; // keep in sync with <th> count above
 
     // ---- Toasts ----
     function showToast(msg, type = "success") {
@@ -241,7 +377,7 @@
       t.className = `toast ${type}`;
       t.textContent = msg;
       document.getElementById("toast-container").appendChild(t);
-      setTimeout(() => t.remove(), 3500);
+      setTimeout(() => t.remove(), 4000);
     }
 
     // ---- Helpers ----
@@ -252,12 +388,28 @@
     }
     function fmtDate(iso) {
       if (!iso) return "—";
-      const d = new Date(iso);
-      return d.toLocaleString();
+      return new Date(iso).toLocaleString();
     }
-    function trunc(str, n = 30) {
+    function trunc(str, n = 28) {
       if (!str) return "—";
       return str.length > n ? str.slice(0, n) + "…" : str;
+    }
+    function fmtMoney(val) {
+      if (val == null) return "—";
+      return Number(val).toLocaleString(undefined, { minimumFractionDigits: 1, maximumFractionDigits: 1 });
+    }
+    function fmtPct(val) {
+      if (val == null) return "—";
+      const sign  = val >= 0 ? "+" : "";
+      const color = val >= 0 ? "#166534" : "#991b1b";
+      const bg    = val >= 0 ? "#dcfce7"  : "#fee2e2";
+      return `<span style="display:inline-block;padding:0.1rem 0.45rem;border-radius:99px;font-size:0.75rem;font-weight:600;background:${bg};color:${color}">${sign}${val.toFixed(1)}%</span>`;
+    }
+    function confPill(score) {
+      if (score == null) return "—";
+      const pct = Math.round(score * 100);
+      const cls = score >= 0.8 ? "high" : score >= 0.5 ? "medium" : "low";
+      return `<span class="conf ${cls}">${pct}%</span>`;
     }
 
     // ---- Render table ----
@@ -271,32 +423,109 @@
       emptyState.style.display = "none";
       table.style.display = "";
       tbody.innerHTML = "";
-      rows.forEach(r => tbody.appendChild(makeRow(r)));
+      rows.forEach(r => {
+        tbody.appendChild(makeSummaryRow(r));
+        tbody.appendChild(makeDetailRow(r));
+      });
     }
 
-    function makeRow(r) {
+    function makeSummaryRow(r) {
       const tr = document.createElement("tr");
+      tr.className = "summary-row";
       tr.dataset.id = r.id;
+
+      const warnings = Array.isArray(r.validation_warnings) ? r.validation_warnings : [];
+
+      const companyCell = r.analysis_error
+        ? `<span class="err-icon" title="Analysis error: ${r.analysis_error}">⚠ Error</span>`
+        : trunc(r.company_name, 22);
+
+      // Append warning count badge next to confidence pill if there are warnings
+      const confCell = confPill(r.confidence_score)
+        + (warnings.length ? `<span class="warn-badge" title="${warnings.length} validation warning(s) — expand row to view">⚠ ${warnings.length}</span>` : "");
+
       tr.innerHTML = `
         <td>${r.id}</td>
-        <td title="${r.filename}">${trunc(r.filename, 28)}</td>
+        <td title="${r.filename}">${trunc(r.filename, 26)}</td>
         <td>${fmtSize(r.file_size)}</td>
         <td>${r.pages ?? "—"}</td>
-        <td title="${r.title || ""}">${trunc(r.title, 24)}</td>
-        <td title="${r.author || ""}">${trunc(r.author, 24)}</td>
+        <td title="${r.company_name || ""}">${companyCell}</td>
+        <td>${r.fiscal_quarter ?? "—"}</td>
+        <td>${r.fiscal_year ?? "—"}</td>
+        <td>${fmtMoney(r.revenue_current)}</td>
+        <td>${fmtMoney(r.pbt_current)}</td>
+        <td>${r.currency ?? "—"}</td>
+        <td>${confCell}</td>
+        <td>${fmtPct(r.revenue_qoq)}</td>
+        <td>${fmtPct(r.revenue_yoy)}</td>
+        <td>${fmtPct(r.pbt_qoq)}</td>
+        <td>${fmtPct(r.pbt_yoy)}</td>
         <td>${fmtDate(r.uploaded_at)}</td>
+        <td><button class="btn-expand" onclick="toggleDetail(${r.id}, this)" title="View details">▼</button></td>
         <td class="col-delete"><button class="btn-delete" onclick="deletePdf(${r.id})">Delete</button></td>
       `;
       return tr;
+    }
+
+    function makeDetailRow(r) {
+      const tr = document.createElement("tr");
+      tr.className = "detail-row";
+      tr.id = `detail-${r.id}`;
+      tr.style.display = "none";
+
+      const warnings = Array.isArray(r.validation_warnings) ? r.validation_warnings : [];
+
+      let innerHtml;
+      if (r.analysis_error) {
+        innerHtml = `
+          <div class="detail-inner error-detail">
+            <div class="detail-block">
+              <h4>Analysis Error</h4>
+              <p style="color:#991b1b;">${r.analysis_error}</p>
+            </div>
+          </div>`;
+      } else {
+        const commentary = r.management_commentary || null;
+        const outlook    = r.outlook_summary || null;
+        const warningsHtml = warnings.length
+          ? `<div class="warnings-block">
+               <h4>Validation Warnings (${warnings.length})</h4>
+               <ul>${warnings.map(w => `<li>${w}</li>`).join("")}</ul>
+             </div>`
+          : "";
+        innerHtml = `
+          <div class="detail-inner">
+            <div class="detail-block">
+              <h4>Management Commentary</h4>
+              <p class="${commentary ? "" : "na"}">${commentary ?? "Not available"}</p>
+            </div>
+            <div class="detail-block">
+              <h4>Outlook</h4>
+              <p class="${outlook ? "" : "na"}">${outlook ?? "Not available"}</p>
+            </div>
+            ${warningsHtml}
+          </div>`;
+      }
+
+      tr.innerHTML = `<td colspan="${TOTAL_COLS}">${innerHtml}</td>`;
+      return tr;
+    }
+
+    function toggleDetail(id, btn) {
+      const row = document.getElementById(`detail-${id}`);
+      if (!row) return;
+      const isOpen = row.style.display !== "none";
+      row.style.display = isOpen ? "none" : "";
+      btn.textContent = isOpen ? "▼" : "▲";
+      btn.classList.toggle("open", !isOpen);
     }
 
     // ---- Load existing ----
     async function loadPdfs() {
       try {
         const res = await fetch("/pdfs");
-        const rows = await res.json();
-        renderRows(rows);
-      } catch (e) {
+        renderRows(await res.json());
+      } catch {
         showToast("Failed to load PDF list.", "error");
       }
     }
@@ -308,37 +537,58 @@
         return;
       }
 
-      // Progress placeholder row
-      const placeholderId = "ph-" + Date.now();
+      // Placeholder row — upload phase
       const ph = document.createElement("tr");
-      ph.id = placeholderId;
       ph.className = "progress-row";
       ph.innerHTML = `
-        <td colspan="8">
-          <span>Uploading <strong>${file.name}</strong>…</span>
+        <td colspan="${TOTAL_COLS}">
+          <div class="progress-label">Uploading <strong>${file.name}</strong>…</div>
           <div class="progress-bar-wrap"><div class="progress-bar" style="width:0%"></div></div>
         </td>`;
       emptyState.style.display = "none";
       table.style.display = "";
       tbody.prepend(ph);
 
-      const bar = ph.querySelector(".progress-bar");
+      const bar    = ph.querySelector(".progress-bar");
+      const label  = ph.querySelector(".progress-label");
+      const barWrap = ph.querySelector(".progress-bar-wrap");
 
       const form = new FormData();
       form.append("file", file);
 
       return new Promise(resolve => {
         const xhr = new XMLHttpRequest();
+
         xhr.upload.addEventListener("progress", e => {
-          if (e.lengthComputable) bar.style.width = (e.loaded / e.total * 100) + "%";
+          if (e.lengthComputable) {
+            const pct = (e.loaded / e.total * 100).toFixed(0);
+            bar.style.width = pct + "%";
+          }
         });
+
+        xhr.upload.addEventListener("load", () => {
+          // Upload done — now waiting for GPT-4o-mini analysis on the server
+          barWrap.style.display = "none";
+          label.innerHTML = `
+            <div class="analysing-label">
+              <div class="spinner"></div>
+              Analysing <strong>${file.name}</strong> with GPT-4o-mini…
+            </div>`;
+        });
+
         xhr.addEventListener("load", () => {
           ph.remove();
           if (xhr.status === 201) {
             const row = JSON.parse(xhr.responseText);
-            tbody.prepend(makeRow(row));
+            const summaryRow = makeSummaryRow(row);
+            const detailRow  = makeDetailRow(row);
+            tbody.prepend(detailRow);
+            tbody.prepend(summaryRow);
             badge.textContent = parseInt(badge.textContent) + 1;
-            showToast(`${file.name} uploaded successfully.`);
+            const label = row.analysis_error
+              ? `${file.name} uploaded (analysis failed).`
+              : `${file.name} uploaded and analysed.`;
+            showToast(label, row.analysis_error ? "warning" : "success");
           } else {
             const err = JSON.parse(xhr.responseText);
             if (xhr.status === 409) {
@@ -350,11 +600,13 @@
           }
           resolve();
         });
+
         xhr.addEventListener("error", () => {
           ph.remove();
           showToast("Network error during upload.", "error");
           resolve();
         });
+
         xhr.open("POST", "/upload");
         xhr.send(form);
       });
@@ -369,7 +621,8 @@
       if (!confirm("Delete this entry and its file?")) return;
       const res = await fetch(`/pdfs/${id}`, { method: "DELETE" });
       if (res.ok) {
-        document.querySelector(`tr[data-id="${id}"]`)?.remove();
+        document.querySelector(`.summary-row[data-id="${id}"]`)?.remove();
+        document.getElementById(`detail-${id}`)?.remove();
         const newCount = parseInt(badge.textContent) - 1;
         badge.textContent = newCount;
         if (newCount === 0) {
