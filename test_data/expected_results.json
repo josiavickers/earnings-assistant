@@ -1,0 +1,170 @@
+{
+  "01_golden_NorthPeak_Analytics_Q1_FY2026.pdf": {
+    "category": "golden",
+    "pages": 2,
+    "metadata": {
+      "title": "NorthPeak Analytics Q1 FY2026 Interim Results",
+      "author": "NorthPeak Analytics Investor Relations",
+      "creator": "NorthPeak FinReporting 4.2"
+    },
+    "figures_all_present": true,
+    "missing_figures": [],
+    "expected_extraction": {
+      "company_name": "NorthPeak Analytics, Inc.",
+      "quarter_end_date": "2026-03-31",
+      "fiscal_quarter": "Q1",
+      "fiscal_year": 2026,
+      "currency": "USD",
+      "unit_raw": "US$ '000",
+      "revenue_current": 48.2,
+      "revenue_previous_quarter": 45.1,
+      "revenue_same_quarter_last_year": 38.5,
+      "pbt_current": 9.6,
+      "pbt_previous_quarter": 8.2,
+      "pbt_same_quarter_last_year": 6.1,
+      "confidence_score": 0.95
+    },
+    "expected_validation_warnings": [],
+    "expected_qoq_yoy": {
+      "revenue_qoq": 6.87,
+      "revenue_yoy": 25.19,
+      "pbt_qoq": 17.07,
+      "pbt_yoy": 57.38
+    }
+  },
+  "02_golden_Lindqvist_Industrial_Q4_FY2025.pdf": {
+    "category": "golden",
+    "pages": 2,
+    "metadata": {
+      "title": "Lindqvist Industrial AB — Interim Report Q4 2025",
+      "author": "Lindqvist Industrial AB (publ)",
+      "creator": "LibreOffice 7.6"
+    },
+    "figures_all_present": true,
+    "missing_figures": [],
+    "expected_extraction": {
+      "company_name": "Lindqvist Industrial AB",
+      "quarter_end_date": "2025-12-31",
+      "fiscal_quarter": "Q4",
+      "fiscal_year": 2025,
+      "currency": "SEK",
+      "unit_raw": "SEK million (MSEK)",
+      "revenue_current": 1240.0,
+      "revenue_previous_quarter": 1180.0,
+      "revenue_same_quarter_last_year": 1090.0,
+      "pbt_current": 148.0,
+      "pbt_previous_quarter": 132.0,
+      "pbt_same_quarter_last_year": 121.0,
+      "confidence_score": 0.9
+    },
+    "expected_validation_warnings": [],
+    "expected_qoq_yoy": {
+      "revenue_qoq": 5.08,
+      "revenue_yoy": 13.76,
+      "pbt_qoq": 12.12,
+      "pbt_yoy": 22.31
+    }
+  },
+  "03_edge_Aurora_BioSciences_Q1_FY2026.pdf": {
+    "category": "edge",
+    "pages": 2,
+    "metadata": {
+      "title": "Aurora BioSciences Q1 FY2026 Results",
+      "author": "Aurora BioSciences Corporation",
+      "creator": "Aurora IR Suite"
+    },
+    "figures_all_present": true,
+    "missing_figures": [],
+    "expected_extraction": {
+      "company_name": "Aurora BioSciences Corporation",
+      "quarter_end_date": "2026-03-31",
+      "fiscal_quarter": "Q1",
+      "fiscal_year": 2026,
+      "currency": "USD",
+      "unit_raw": "US$ '000",
+      "revenue_current": 12.4,
+      "revenue_previous_quarter": 9.8,
+      "revenue_same_quarter_last_year": 15.2,
+      "pbt_current": -22.6,
+      "pbt_previous_quarter": -18.4,
+      "pbt_same_quarter_last_year": -14.1,
+      "confidence_score": 0.9
+    },
+    "expected_validation_warnings": [],
+    "expected_qoq_yoy": {
+      "revenue_qoq": 26.53,
+      "revenue_yoy": -18.42,
+      "pbt_qoq": -22.83,
+      "pbt_yoy": -60.28
+    }
+  },
+  "04_edge_Yamato_Robotics_Q4_FY2026.pdf": {
+    "category": "edge",
+    "pages": 2,
+    "metadata": {
+      "title": "Yamato Robotics FY2026 Q4 / Full-Year Tanshin",
+      "author": "Yamato Robotics K.K.",
+      "creator": "TDnet XBRL Generator"
+    },
+    "figures_all_present": true,
+    "missing_figures": [],
+    "expected_extraction": {
+      "company_name": "Yamato Robotics K.K.",
+      "quarter_end_date": "2026-03-31",
+      "fiscal_quarter": "Q4",
+      "fiscal_year": 2026,
+      "currency": "JPY",
+      "unit_raw": "¥ million",
+      "revenue_current": 49800.0,
+      "revenue_previous_quarter": 46200.0,
+      "revenue_same_quarter_last_year": 44100.0,
+      "pbt_current": 5900.0,
+      "pbt_previous_quarter": 5400.0,
+      "pbt_same_quarter_last_year": 5100.0,
+      "confidence_score": 0.85
+    },
+    "expected_validation_warnings": [],
+    "expected_qoq_yoy": {
+      "revenue_qoq": 7.79,
+      "revenue_yoy": 12.93,
+      "pbt_qoq": 9.26,
+      "pbt_yoy": 15.69
+    }
+  },
+  "05_adversarial_TransPacific_Global_Q2_FY2026.pdf": {
+    "category": "adversarial",
+    "pages": 2,
+    "metadata": {
+      "title": "Meridian Corp — Q3 FY2025 Annual Report (FINAL)",
+      "author": "Document Services",
+      "creator": "Microsoft® Word 2019"
+    },
+    "figures_all_present": true,
+    "missing_figures": [],
+    "expected_extraction": {
+      "company_name": "Trans-Pacific Global Holdings Ltd",
+      "quarter_end_date": "2026-03-31",
+      "fiscal_quarter": "Q2",
+      "fiscal_year": 2026,
+      "currency": "SGD",
+      "unit_raw": "$ '000",
+      "revenue_current": 340.0,
+      "revenue_previous_quarter": 355.0,
+      "revenue_same_quarter_last_year": 362.0,
+      "pbt_current": 512.0,
+      "pbt_previous_quarter": 41.0,
+      "pbt_same_quarter_last_year": 47.0,
+      "confidence_score": 0.45
+    },
+    "expected_validation_warnings": [
+      "pbt_current (512.00M) exceeds revenue_current (340.00M) — profit before tax cannot exceed revenue",
+      "Low confidence score (45%) — results should be reviewed manually"
+    ],
+    "expected_qoq_yoy": {
+      "revenue_qoq": -4.23,
+      "revenue_yoy": -6.08,
+      "pbt_qoq": 1148.78,
+      "pbt_yoy": 989.36
+    }
+  }
+}
