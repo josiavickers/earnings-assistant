@@ -153,6 +153,96 @@
     }
     .btn-delete:hover { background: #fee2e2; }
 
+    .btn-report {
+      display: inline-block;
+      background: #eff6ff;
+      color: #3b82f6;
+      text-decoration: none;
+      cursor: pointer;
+      padding: 0.25rem 0.6rem;
+      border-radius: 6px;
+      font-size: 0.75rem;
+      font-weight: 600;
+      transition: background 0.15s;
+      white-space: nowrap;
+    }
+    .btn-report:hover { background: #dbeafe; }
+
+    .btn-approve {
+      background: #dcfce7;
+      color: #166534;
+      border: none;
+      cursor: pointer;
+      padding: 0.3rem 0.7rem;
+      border-radius: 6px;
+      font-size: 0.75rem;
+      font-weight: 600;
+      white-space: nowrap;
+    }
+    .btn-approve:hover { background: #bbf7d0; }
+    .btn-approve:disabled { opacity: 0.5; cursor: not-allowed; }
+
+    .btn-fail {
+      background: #fee2e2;
+      color: #991b1b;
+      border: none;
+      cursor: pointer;
+      padding: 0.3rem 0.7rem;
+      border-radius: 6px;
+      font-size: 0.75rem;
+      font-weight: 600;
+      white-space: nowrap;
+    }
+    .btn-fail:hover { background: #fecaca; }
+    .btn-fail:disabled { opacity: 0.5; cursor: not-allowed; }
+
+    .btn-discard {
+      background: none;
+      border: 1px solid #e5e7eb;
+      color: #6b7280;
+      cursor: pointer;
+      padding: 0.28rem 0.6rem;
+      border-radius: 6px;
+      font-size: 0.75rem;
+      font-weight: 500;
+      white-space: nowrap;
+    }
+    .btn-discard:hover { background: #f1f5f9; }
+
+    .fail-notes {
+      font-size: 0.8rem;
+      padding: 0.32rem 0.55rem;
+      border: 1px solid #e5e7eb;
+      border-radius: 6px;
+      min-width: 170px;
+      flex: 1 1 170px;
+    }
+
+    .pending-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.4rem;
+      align-items: center;
+    }
+
+    .attempt-badge {
+      display: inline-block;
+      background: #ede9fe;
+      color: #5b21b6;
+      border-radius: 99px;
+      padding: 0.1rem 0.5rem;
+      font-size: 0.75rem;
+      font-weight: 600;
+      cursor: default;
+    }
+
+    .review-hint {
+      font-size: 0.7rem;
+      color: #9ca3af;
+      margin-top: 0.2rem;
+      flex-basis: 100%;
+    }
+
     .btn-expand {
       background: none;
       border: none;
@@ -313,7 +403,7 @@
 <body>
   <div class="container">
     <h1>Earnings Report Assistant</h1>
-    <p class="subtitle">Drop quarterly earnings PDFs — metadata and GPT-4o-mini analysis are saved automatically.</p>
+    <p class="subtitle">Drop quarterly earnings PDFs, then download and review the generated report — figures are only saved once you approve it.</p>
 
     <div id="drop-zone">
       <svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24">
@@ -324,13 +414,38 @@
       <input type="file" id="file-input" accept=".pdf" multiple />
     </div>
 
+    <div class="card" style="margin-bottom:1.5rem;">
+      <div class="card-header">
+        <h2>Pending Review</h2>
+        <span class="badge" id="pending-count-badge">0</span>
+      </div>
+      <div id="pending-table-wrap">
+        <div class="empty-state" id="pending-empty-state">No uploads awaiting review.</div>
+        <table id="pending-table" style="display:none;">
+          <thead>
+            <tr>
+              <th>#</th>
+              <th>Filename</th>
+              <th>Company</th>
+              <th>Quarter</th>
+              <th>FY</th>
+              <th>Confidence</th>
+              <th>Attempts</th>
+              <th style="min-width:380px;">Review Actions</th>
+            </tr>
+          </thead>
+          <tbody id="pending-tbody"></tbody>
+        </table>
+      </div>
+    </div>
+
     <div class="card">
       <div class="card-header">
-        <h2>Uploaded PDFs</h2>
+        <h2>Approved Reports</h2>
         <span class="badge" id="count-badge">0</span>
       </div>
       <div id="table-wrap">
-        <div class="empty-state" id="empty-state">No PDFs uploaded yet.</div>
+        <div class="empty-state" id="empty-state">No approved reports yet.</div>
         <table id="pdf-table" style="display:none;">
           <thead>
             <tr>
@@ -350,6 +465,7 @@
               <th>PBT QoQ%</th>
               <th>PBT YoY%</th>
               <th>Uploaded</th>
+              <th>Report</th>
               <th></th>
               <th class="col-delete"></th>
             </tr>
@@ -369,7 +485,13 @@
     const table      = document.getElementById("pdf-table");
     const emptyState = document.getElementById("empty-state");
     const badge      = document.getElementById("count-badge");
-    const TOTAL_COLS = 18; // keep in sync with <th> count above
+    const TOTAL_COLS = 19; // keep in sync with <th> count above
+
+    // ---- Pending review elements ----
+    const pendingTbody      = document.getElementById("pending-tbody");
+    const pendingTable      = document.getElementById("pending-table");
+    const pendingEmptyState = document.getElementById("pending-empty-state");
+    const pendingBadge      = document.getElementById("pending-count-badge");
 
     // ---- Toasts ----
     function showToast(msg, type = "success") {
@@ -410,6 +532,150 @@
       const pct = Math.round(score * 100);
       const cls = score >= 0.8 ? "high" : score >= 0.5 ? "medium" : "low";
       return `<span class="conf ${cls}">${pct}%</span>`;
+    }
+
+    // ---- Pending review: render ----
+    function makePendingRow(p) {
+      const tr = document.createElement("tr");
+      tr.className = "summary-row";
+      tr.dataset.pendingId = p.id;
+
+      const companyCell = p.analysis_error
+        ? `<span class="err-icon" title="Analysis error: ${p.analysis_error}">⚠ Error</span>`
+        : trunc(p.company_name, 20);
+
+      const instructions = Array.isArray(p.extra_instructions) ? p.extra_instructions : [];
+      const attemptsCell = p.attempt_count > 1
+        ? `<span class="attempt-badge" title="${instructions.map((s, i) => `${i + 1}. ${s}`).join(" | ") || "No notes recorded"}">${p.attempt_count}</span>`
+        : p.attempt_count;
+
+      tr.innerHTML = `
+        <td>${p.id}</td>
+        <td title="${p.filename}">${trunc(p.filename, 22)}</td>
+        <td title="${p.company_name || ""}">${companyCell}</td>
+        <td>${p.fiscal_quarter ?? "—"}</td>
+        <td>${p.fiscal_year ?? "—"}</td>
+        <td>${confPill(p.confidence_score)}</td>
+        <td>${attemptsCell}</td>
+        <td>
+          <div class="pending-actions">
+            <a class="btn-report" href="/pending/${p.id}/report" target="_blank" onclick="markDownloaded(${p.id})" title="Download the draft review PDF">⬇ Download</a>
+            <button class="btn-approve" onclick="approvePending(${p.id})" title="Save the extracted figures to the database">Approve</button>
+            <input type="text" class="fail-notes" id="notes-${p.id}" placeholder="Notes for the rerun (optional)" />
+            <button class="btn-fail" onclick="failPending(${p.id})" title="Rerun the LLM extraction with your notes">Fail &amp; Rerun</button>
+            <button class="btn-discard" onclick="discardPending(${p.id})" title="Discard this upload entirely">Discard</button>
+            <span class="review-hint">Download and open the report before approving or failing.</span>
+          </div>
+        </td>
+      `;
+      return tr;
+    }
+
+    function renderPending(rows) {
+      pendingBadge.textContent = rows.length;
+      if (rows.length === 0) {
+        pendingTable.style.display = "none";
+        pendingEmptyState.style.display = "";
+        return;
+      }
+      pendingEmptyState.style.display = "none";
+      pendingTable.style.display = "";
+      pendingTbody.innerHTML = "";
+      rows.forEach(p => pendingTbody.appendChild(makePendingRow(p)));
+    }
+
+    async function loadPending() {
+      try {
+        const res = await fetch("/pending");
+        renderPending(await res.json());
+      } catch {
+        showToast("Failed to load pending reviews.", "error");
+      }
+    }
+
+    function markDownloaded(id) {
+      // The GET to /pending/<id>/report already records the download server-side;
+      // this just gives immediate visual feedback that review can proceed.
+      showToast("Report downloaded — review it, then approve or fail.", "success");
+    }
+
+    function addPendingRow(p) {
+      pendingTbody.prepend(makePendingRow(p));
+      pendingEmptyState.style.display = "none";
+      pendingTable.style.display = "";
+      pendingBadge.textContent = parseInt(pendingBadge.textContent || "0") + 1;
+    }
+
+    function removePendingRow(id) {
+      document.querySelector(`tr[data-pending-id="${id}"]`)?.remove();
+      const newCount = Math.max(0, parseInt(pendingBadge.textContent || "0") - 1);
+      pendingBadge.textContent = newCount;
+      if (newCount === 0) {
+        pendingTable.style.display = "none";
+        pendingEmptyState.style.display = "";
+      }
+    }
+
+    // ---- Pending review: actions ----
+    async function approvePending(id) {
+      try {
+        const res = await fetch(`/pending/${id}/approve`, { method: "POST" });
+        const body = await res.json();
+        if (res.ok) {
+          removePendingRow(id);
+          emptyState.style.display = "none";
+          table.style.display = "";
+          tbody.prepend(makeDetailRow(body));
+          tbody.prepend(makeSummaryRow(body));
+          badge.textContent = parseInt(badge.textContent || "0") + 1;
+          showToast(`${body.filename} approved and saved.`, "success");
+        } else {
+          showToast(body.message || body.error || "Approve failed.", "error");
+        }
+      } catch {
+        showToast("Network error while approving.", "error");
+      }
+    }
+
+    async function failPending(id) {
+      const input = document.getElementById(`notes-${id}`);
+      const instructions = input ? input.value.trim() : "";
+      const row = document.querySelector(`tr[data-pending-id="${id}"]`);
+      if (row) row.style.opacity = "0.5";
+      showToast("Re-running analysis with your notes…", "warning");
+      try {
+        const res = await fetch(`/pending/${id}/reject`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ instructions }),
+        });
+        const body = await res.json();
+        if (res.ok) {
+          showToast(`Entry #${id} re-analysed (attempt ${body.attempt_count}). Download and review again.`, "success");
+          loadPending();
+        } else {
+          showToast(body.message || body.error || "Failed to rerun evaluation.", "error");
+        }
+      } catch {
+        showToast("Network error while failing evaluation.", "error");
+      } finally {
+        if (row) row.style.opacity = "1";
+      }
+    }
+
+    async function discardPending(id) {
+      if (!confirm("Discard this pending upload and delete its file? This cannot be undone.")) return;
+      try {
+        const res = await fetch(`/pending/${id}`, { method: "DELETE" });
+        if (res.ok) {
+          removePendingRow(id);
+          showToast("Pending upload discarded.");
+        } else {
+          showToast("Discard failed.", "error");
+        }
+      } catch {
+        showToast("Network error while discarding.", "error");
+      }
     }
 
     // ---- Render table ----
@@ -461,6 +727,7 @@
         <td>${fmtPct(r.pbt_qoq)}</td>
         <td>${fmtPct(r.pbt_yoy)}</td>
         <td>${fmtDate(r.uploaded_at)}</td>
+        <td><a class="btn-report" href="/pdfs/${r.id}/report" title="Download PDF review report">⬇ PDF</a></td>
         <td><button class="btn-expand" onclick="toggleDetail(${r.id}, this)" title="View details">▼</button></td>
         <td class="col-delete"><button class="btn-delete" onclick="deletePdf(${r.id})">Delete</button></td>
       `;
@@ -580,14 +847,10 @@
           ph.remove();
           if (xhr.status === 201) {
             const row = JSON.parse(xhr.responseText);
-            const summaryRow = makeSummaryRow(row);
-            const detailRow  = makeDetailRow(row);
-            tbody.prepend(detailRow);
-            tbody.prepend(summaryRow);
-            badge.textContent = parseInt(badge.textContent) + 1;
+            addPendingRow(row);
             const label = row.analysis_error
-              ? `${file.name} uploaded (analysis failed).`
-              : `${file.name} uploaded and analysed.`;
+              ? `${file.name} uploaded (analysis failed) — review required.`
+              : `${file.name} analysed — download the report to review before it's saved.`;
             showToast(label, row.analysis_error ? "warning" : "success");
           } else {
             const err = JSON.parse(xhr.responseText);
@@ -651,6 +914,7 @@
 
     // ---- Init ----
     loadPdfs();
+    loadPending();
   </script>
 </body>
 </html>

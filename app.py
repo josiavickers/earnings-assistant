@@ -11,7 +11,7 @@ try:
     load_dotenv()
 except ImportError:
     pass
-from flask import Flask, request, jsonify, render_template, g
+from flask import Flask, request, jsonify, render_template, g, send_file
 
 # ---------- PDF handling ----------
 
@@ -42,6 +42,238 @@ except ImportError:
 
     def extract_pdf_text(path):
         return ""
+
+# ---------- PDF review report generation ----------
+
+try:
+    from xml.sax.saxutils import escape as _xml_escape
+
+    from reportlab.lib import colors
+    from reportlab.lib.enums import TA_LEFT
+    from reportlab.lib.pagesizes import letter
+    from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+    from reportlab.lib.units import inch
+    from reportlab.platypus import (
+        HRFlowable,
+        Paragraph,
+        SimpleDocTemplate,
+        Spacer,
+        Table,
+        TableStyle,
+    )
+
+    _reportlab_available = True
+
+except ImportError:
+    _reportlab_available = False
+
+
+def _esc(value) -> str:
+    """XML-escape a value for safe use inside a reportlab Paragraph."""
+    if value is None:
+        return ""
+    return _xml_escape(str(value)) if _reportlab_available else str(value)
+
+
+def _fmt_money(val) -> str:
+    if val is None:
+        return "—"
+    return f"{val:,.1f}"
+
+
+def _fmt_pct(val) -> str:
+    if val is None:
+        return "—"
+    sign = "+" if val >= 0 else ""
+    return f"{sign}{val:.1f}%"
+
+
+def generate_report_pdf(data: dict, out_path: str) -> None:
+    """Render the structured earnings JSON as a nicely formatted PDF for a
+    human reviewer. `data` is expected to look like a pdf_metadata row dict
+    (validation_warnings already deserialised into a list or None)."""
+
+    if not _reportlab_available:
+        raise RuntimeError("reportlab is not installed — run: pip install reportlab")
+
+    styles = getSampleStyleSheet()
+    title_style = ParagraphStyle(
+        "ReportTitle", parent=styles["Title"], fontSize=19, alignment=TA_LEFT, spaceAfter=2,
+    )
+    subtitle_style = ParagraphStyle(
+        "ReportSubtitle", parent=styles["Normal"], fontSize=11.5,
+        textColor=colors.HexColor("#6b7280"), spaceAfter=14,
+    )
+    h2_style = ParagraphStyle(
+        "H2", parent=styles["Heading2"], fontSize=12.5,
+        textColor=colors.HexColor("#1a1a2e"), spaceBefore=16, spaceAfter=6,
+    )
+    body_style = ParagraphStyle(
+        "Body", parent=styles["Normal"], fontSize=10, leading=14,
+        textColor=colors.HexColor("#374151"),
+    )
+    na_style = ParagraphStyle(
+        "NA", parent=body_style, textColor=colors.HexColor("#9ca3af"), fontName="Helvetica-Oblique",
+    )
+    meta_style = ParagraphStyle(
+        "Meta", parent=styles["Normal"], fontSize=8.5, textColor=colors.HexColor("#9ca3af"),
+    )
+    err_style = ParagraphStyle(
+        "Err", parent=body_style, textColor=colors.HexColor("#991b1b"),
+        backColor=colors.HexColor("#fee2e2"), borderPadding=8, borderRadius=4,
+    )
+    warn_style = ParagraphStyle(
+        "Warn", parent=body_style, textColor=colors.HexColor("#78350f"),
+        backColor=colors.HexColor("#fef9c3"), borderPadding=6, borderRadius=4, spaceAfter=5,
+    )
+    note_style = ParagraphStyle(
+        "Note", parent=meta_style, spaceBefore=6,
+    )
+
+    company = data.get("company_name") or "Unknown Company"
+    fq, fy = data.get("fiscal_quarter"), data.get("fiscal_year")
+    if fq and fy:
+        period = f"{fq} {fy}"
+    elif fq or fy:
+        period = fq or str(fy)
+    else:
+        period = "Reporting period unknown"
+
+    doc = SimpleDocTemplate(
+        out_path,
+        pagesize=letter,
+        topMargin=0.75 * inch, bottomMargin=0.75 * inch,
+        leftMargin=0.75 * inch, rightMargin=0.75 * inch,
+        title=f"Earnings Review — {company}",
+    )
+    story = []
+
+    story.append(Paragraph("Quarterly Earnings — Review Report", title_style))
+    story.append(Paragraph(f"{_esc(company)} &nbsp;&bull;&nbsp; {_esc(period)}", subtitle_style))
+    story.append(HRFlowable(width="100%", thickness=1, color=colors.HexColor("#e5e7eb"), spaceAfter=14))
+
+    # ---- Source / extraction metadata ----
+    conf = data.get("confidence_score")
+    conf_text = f"{conf:.0%}" if isinstance(conf, (int, float)) else "—"
+    meta_rows = [
+        ["Source file",           data.get("filename") or "—"],
+        ["Pages",                 str(data.get("pages")) if data.get("pages") is not None else "—"],
+        ["Quarter end date",      data.get("quarter_end_date") or "—"],
+        ["Reporting currency",    data.get("currency") or "—"],
+        ["Unit as reported",      data.get("unit_raw") or "—"],
+        ["Extraction confidence", conf_text],
+        ["Uploaded",              data.get("uploaded_at") or "—"],
+    ]
+    meta_table = Table(meta_rows, colWidths=[1.8 * inch, 4.2 * inch])
+    meta_table.setStyle(TableStyle([
+        ("FONTSIZE", (0, 0), (-1, -1), 9),
+        ("TEXTCOLOR", (0, 0), (0, -1), colors.HexColor("#6b7280")),
+        ("TEXTCOLOR", (1, 0), (1, -1), colors.HexColor("#1a1a2e")),
+        ("FONTNAME", (0, 0), (0, -1), "Helvetica-Bold"),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+        ("TOPPADDING", (0, 0), (-1, -1), 4),
+        ("LINEBELOW", (0, 0), (-1, -2), 0.5, colors.HexColor("#f1f5f9")),
+    ]))
+    story.append(meta_table)
+
+    def add_footer():
+        story.append(Spacer(1, 22))
+        story.append(HRFlowable(width="100%", thickness=0.5, color=colors.HexColor("#e5e7eb"), spaceAfter=6))
+        generated = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+        story.append(Paragraph(
+            f"Auto-generated from a GPT-4o-mini extraction of entry #{data.get('id', '—')}. "
+            f"Report generated {generated}. This report is provided for human review — "
+            f"verify all figures against the source PDF before relying on them.",
+            meta_style,
+        ))
+
+    # ---- Analysis error: short-circuit with an error banner ----
+    if data.get("analysis_error"):
+        story.append(Paragraph("Analysis Error", h2_style))
+        story.append(Paragraph(_esc(data["analysis_error"]), err_style))
+        story.append(Spacer(1, 8))
+        story.append(Paragraph(
+            "No structured financial data could be extracted from this document. "
+            "Please review the source PDF manually.", body_style,
+        ))
+        add_footer()
+        doc.build(story)
+        return
+
+    # ---- Financial summary ----
+    story.append(Paragraph("Financial Summary", h2_style))
+    currency = data.get("currency") or ""
+    metric_suffix = f" ({currency}M)" if currency else " (M)"
+    fin_header = ["Metric", "Current Qtr", "Prev Qtr", "Same Qtr LY", "QoQ %", "YoY %"]
+    fin_rows = [
+        fin_header,
+        [
+            "Revenue" + metric_suffix,
+            _fmt_money(data.get("revenue_current")),
+            _fmt_money(data.get("revenue_previous_quarter")),
+            _fmt_money(data.get("revenue_same_quarter_last_year")),
+            _fmt_pct(data.get("revenue_qoq")),
+            _fmt_pct(data.get("revenue_yoy")),
+        ],
+        [
+            "PBT" + metric_suffix,
+            _fmt_money(data.get("pbt_current")),
+            _fmt_money(data.get("pbt_previous_quarter")),
+            _fmt_money(data.get("pbt_same_quarter_last_year")),
+            _fmt_pct(data.get("pbt_qoq")),
+            _fmt_pct(data.get("pbt_yoy")),
+        ],
+    ]
+    fin_table = Table(
+        fin_rows,
+        colWidths=[1.6 * inch, 0.95 * inch, 0.95 * inch, 1.05 * inch, 0.7 * inch, 0.7 * inch],
+    )
+    table_style_cmds = [
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#f8fafc")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.HexColor("#64748b")),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("FONTSIZE", (0, 0), (-1, -1), 9),
+        ("FONTNAME", (0, 1), (0, -1), "Helvetica-Bold"),
+        ("ALIGN", (1, 0), (-1, -1), "RIGHT"),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+        ("TOPPADDING", (0, 0), (-1, -1), 6),
+        ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#e5e7eb")),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+    ]
+    for r_idx in (1, 2):
+        for c_idx in (4, 5):
+            cell_val = fin_rows[r_idx][c_idx]
+            if cell_val != "—":
+                is_pos = cell_val.startswith("+")
+                table_style_cmds.append((
+                    "TEXTCOLOR", (c_idx, r_idx), (c_idx, r_idx),
+                    colors.HexColor("#166534") if is_pos else colors.HexColor("#991b1b"),
+                ))
+    fin_table.setStyle(TableStyle(table_style_cmds))
+    story.append(fin_table)
+    story.append(Paragraph(
+        "All monetary values normalised to millions of the reporting currency.", note_style,
+    ))
+
+    # ---- Commentary & outlook ----
+    story.append(Paragraph("Management Commentary", h2_style))
+    commentary = data.get("management_commentary")
+    story.append(Paragraph(_esc(commentary), body_style) if commentary else Paragraph("Not available", na_style))
+
+    story.append(Paragraph("Outlook", h2_style))
+    outlook = data.get("outlook_summary")
+    story.append(Paragraph(_esc(outlook), body_style) if outlook else Paragraph("Not available", na_style))
+
+    # ---- Validation warnings ----
+    warnings = data.get("validation_warnings") or []
+    if warnings:
+        story.append(Paragraph(f"Validation Warnings ({len(warnings)})", h2_style))
+        for w in warnings:
+            story.append(Paragraph(f"⚠ {_esc(w)}", warn_style))
+
+    add_footer()
+    doc.build(story)
+
 
 # ---------- Pydantic validation ----------
 
@@ -237,8 +469,12 @@ Rules:
 - Return ONLY the JSON object — no markdown, no extra text."""
 
 
-def analyse_earnings(pdf_text: str) -> dict:
+def analyse_earnings(pdf_text: str, extra_instructions: str | None = None) -> dict:
     """Call GPT-4o-mini to extract structured earnings data from PDF text.
+
+    `extra_instructions`, when provided, is reviewer-supplied guidance from a
+    failed evaluation re-run (e.g. "the currency is EUR not USD") that gets
+    woven into the prompt so the model corrects course on the retry.
 
     Returns a dict with the 10 structured fields, or a dict containing
     'analysis_error' if the call could not be completed.
@@ -256,19 +492,25 @@ def analyse_earnings(pdf_text: str) -> dict:
         # Truncate to ~100 k chars (~25 k tokens) to stay within context limits
         truncated_text = pdf_text[:100_000]
 
+        user_content = (
+            "Parse this quarterly earnings report and return the structured JSON:\n\n"
+            + truncated_text
+        )
+        if extra_instructions:
+            user_content = (
+                "IMPORTANT — a human reviewer rejected a previous extraction attempt "
+                "for this same document and left the following notes. Follow them "
+                "carefully when re-parsing the report below:\n"
+                f"{extra_instructions}\n\n" + user_content
+            )
+
         response = client.chat.completions.create(
             model="gpt-4o-mini",
             response_format={"type": "json_object"},
             temperature=0,
             messages=[
                 {"role": "system", "content": EARNINGS_SYSTEM_PROMPT},
-                {
-                    "role": "user",
-                    "content": (
-                        "Parse this quarterly earnings report and return the structured JSON:\n\n"
-                        + truncated_text
-                    ),
-                },
+                {"role": "user", "content": user_content},
             ],
         )
 
@@ -381,14 +623,92 @@ def compute_qoq_yoy(analysis: dict, db) -> dict:
     return result
 
 
+# ---------- Extraction pipeline (review-gated) ----------
+
+# The exact set of fields the LLM is asked to extract. These are staged in
+# pending_reviews and are NOT written to pdf_metadata until a human approves
+# the generated report.
+EXTRACTED_FIELDS = [
+    "company_name", "quarter_end_date", "fiscal_quarter", "fiscal_year",
+    "currency", "unit_raw",
+    "revenue_current", "revenue_previous_quarter", "revenue_same_quarter_last_year",
+    "pbt_current", "pbt_previous_quarter", "pbt_same_quarter_last_year",
+    "management_commentary", "outlook_summary", "confidence_score",
+]
+
+
+def _package_extracted_data(analysis: dict, analysis_error, warnings: list, growth: dict) -> dict:
+    """Assemble the canonical structured-output dict — same shape that used
+    to be written straight to the DB — but now this is only ever persisted
+    inside pending_reviews.extracted_data until a reviewer approves it."""
+    data = {field: analysis.get(field) for field in EXTRACTED_FIELDS}
+    data["analysis_error"]      = analysis_error
+    data["validation_warnings"] = warnings if warnings else None
+    data["revenue_qoq"]         = growth["revenue_qoq"]
+    data["revenue_yoy"]         = growth["revenue_yoy"]
+    data["pbt_qoq"]             = growth["pbt_qoq"]
+    data["pbt_yoy"]             = growth["pbt_yoy"]
+    return data
+
+
+def _run_llm_pipeline(pdf_text: str, db, extra_instructions: str | None = None) -> dict:
+    """Run the LLM extraction + validation + growth calculation and return
+    the packaged extracted-data dict. Used for both the initial upload and
+    any reviewer-triggered rerun."""
+    analysis = analyse_earnings(pdf_text, extra_instructions=extra_instructions)
+    analysis_error = analysis.get("analysis_error")
+    warnings = [] if analysis_error else validate_analysis(analysis)
+    growth = compute_qoq_yoy(analysis, db)
+    return _package_extracted_data(analysis, analysis_error, warnings, growth)
+
+
 # ---------- Flask app ----------
 
 app = Flask(__name__)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 UPLOAD_FOLDER = os.path.join(BASE_DIR, "uploads")
+REPORTS_FOLDER = os.path.join(BASE_DIR, "reports")
 DB_PATH = os.path.join(BASE_DIR, "pdfs.db")
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+os.makedirs(REPORTS_FOLDER, exist_ok=True)
+
+
+def _row_to_report_data(row: sqlite3.Row) -> dict:
+    """Convert a pdf_metadata DB row into the plain dict shape expected by
+    generate_report_pdf (validation_warnings deserialised into a list)."""
+    d = dict(row)
+    raw_warnings = d.get("validation_warnings")
+    d["validation_warnings"] = json.loads(raw_warnings) if raw_warnings else None
+    return d
+
+
+def _build_report_for_row(db, row: sqlite3.Row) -> str:
+    """Generate (or re-generate) the PDF review report for an APPROVED
+    pdf_metadata row and persist its path on the record. Returns the
+    absolute file path."""
+    data = _row_to_report_data(row)
+    report_path = os.path.join(REPORTS_FOLDER, f"report_{row['id']}.pdf")
+    generate_report_pdf(data, report_path)
+    db.execute("UPDATE pdf_metadata SET report_path = ? WHERE id = ?", (report_path, row["id"]))
+    db.commit()
+    return report_path
+
+
+def _build_pending_report(db, row: sqlite3.Row) -> str:
+    """Generate (or re-generate) the draft PDF review report for a
+    pending_reviews row and persist its path on the record."""
+    extracted_data = json.loads(row["extracted_data"])
+    payload = dict(extracted_data)
+    payload["id"]          = row["id"]
+    payload["filename"]    = row["filename"]
+    payload["pages"]       = row["pages"]
+    payload["uploaded_at"] = row["uploaded_at"]
+    report_path = os.path.join(REPORTS_FOLDER, f"pending_{row['id']}.pdf")
+    generate_report_pdf(payload, report_path)
+    db.execute("UPDATE pending_reviews SET report_path = ? WHERE id = ?", (report_path, row["id"]))
+    db.commit()
+    return report_path
 
 ALLOWED_EXTENSIONS = {"pdf"}
 
@@ -415,6 +735,7 @@ ANALYSIS_COLUMNS = [
     ("revenue_yoy",                    "REAL"),
     ("pbt_qoq",                        "REAL"),
     ("pbt_yoy",                        "REAL"),
+    ("report_path",                    "TEXT"),
 ]
 
 
@@ -473,7 +794,33 @@ def init_db():
                 revenue_qoq                    REAL,
                 revenue_yoy                    REAL,
                 pbt_qoq                        REAL,
-                pbt_yoy                        REAL
+                pbt_yoy                        REAL,
+                report_path                    TEXT
+            )
+        """)
+        db.commit()
+
+        # Extracted figures/text live here ONLY until a human reviewer
+        # approves the generated PDF report — nothing here is "the database"
+        # of record; approval is what copies a row into pdf_metadata.
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS pending_reviews (
+                id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+                filename            TEXT NOT NULL,
+                file_size           INTEGER NOT NULL,
+                sha256              TEXT NOT NULL,
+                pages               INTEGER,
+                title               TEXT,
+                author              TEXT,
+                creator             TEXT,
+                uploaded_at         TEXT NOT NULL,
+                extracted_data      TEXT NOT NULL,
+                report_path         TEXT,
+                attempt_count       INTEGER NOT NULL DEFAULT 1,
+                extra_instructions  TEXT NOT NULL DEFAULT '[]',
+                downloaded_at       TEXT,
+                created_at          TEXT NOT NULL,
+                updated_at          TEXT NOT NULL
             )
         """)
         db.commit()
@@ -501,6 +848,10 @@ def index():
 
 @app.route("/upload", methods=["POST"])
 def upload():
+    """Save the PDF, run the LLM extraction, and stage the result in
+    pending_reviews. Nothing is written to pdf_metadata at this point —
+    that only happens once a human approves the generated report via
+    POST /pending/<id>/approve."""
     if "file" not in request.files:
         return jsonify({"error": "No file part"}), 400
 
@@ -515,8 +866,9 @@ def upload():
     file_size = len(file_bytes)
     sha256 = hashlib.sha256(file_bytes).hexdigest()
 
-    # Duplicate check
     db = get_db()
+
+    # Duplicate check — against approved entries...
     existing = db.execute(
         "SELECT id, filename FROM pdf_metadata WHERE sha256 = ? AND file_size = ?",
         (sha256, file_size),
@@ -525,10 +877,25 @@ def upload():
         return jsonify({
             "error": "duplicate",
             "message": (
-                f'This file has already been uploaded as "{existing["filename"]}"'
+                f'This file has already been uploaded and approved as "{existing["filename"]}"'
                 f" (entry #{existing['id']})."
             ),
             "existing_id": existing["id"],
+        }), 409
+
+    # ...and against reviews still awaiting a decision
+    pending_existing = db.execute(
+        "SELECT id, filename FROM pending_reviews WHERE sha256 = ? AND file_size = ?",
+        (sha256, file_size),
+    ).fetchone()
+    if pending_existing:
+        return jsonify({
+            "error": "duplicate",
+            "message": (
+                f'This file is already awaiting review as "{pending_existing["filename"]}"'
+                f" (pending #{pending_existing['id']})."
+            ),
+            "existing_pending_id": pending_existing["id"],
         }), 409
 
     # Save file
@@ -548,34 +915,138 @@ def upload():
     # GPT-4o-mini earnings analysis
     print(f"\n[INFO] Starting GPT-4o-mini analysis for: {safe_name}")
     pdf_text = extract_pdf_text(save_path)
-    analysis = analyse_earnings(pdf_text)
+    extracted_data = _run_llm_pipeline(pdf_text, db)
 
-    analysis_error = analysis.get("analysis_error")
-
-    # Validate the LLM output (only when we got a real response, not an API error)
-    if analysis_error:
-        warnings = []
-    else:
-        warnings = validate_analysis(analysis)
-
-    validation_warnings_json = json.dumps(warnings) if warnings else None
-
-    # QoQ / YoY growth rates (DB-first, then report fallback)
-    growth = compute_qoq_yoy(analysis, db)
-
-    # ---- Debug output (printed after validation so all derived fields are included) ----
-    debug_output = {k: v for k, v in analysis.items() if k != "analysis_error"}
-    debug_output["analysis_error"]      = analysis_error
-    debug_output["validation_warnings"] = warnings if warnings else None
-    debug_output["revenue_qoq"]         = growth["revenue_qoq"]
-    debug_output["revenue_yoy"]         = growth["revenue_yoy"]
-    debug_output["pbt_qoq"]             = growth["pbt_qoq"]
-    debug_output["pbt_yoy"]             = growth["pbt_yoy"]
     print("\n" + "=" * 50)
-    print("GPT-4o-mini Earnings Analysis")
+    print("GPT-4o-mini Earnings Analysis — PENDING REVIEW (not yet saved to the database)")
     print("=" * 50)
-    print(json.dumps(debug_output, indent=2, ensure_ascii=False))
+    print(json.dumps(extracted_data, indent=2, ensure_ascii=False))
     print("=" * 50 + "\n")
+
+    cur = db.execute(
+        """INSERT INTO pending_reviews (
+               filename, file_size, sha256, pages, title, author, creator, uploaded_at,
+               extracted_data, attempt_count, extra_instructions, created_at, updated_at
+           ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (
+            safe_name, file_size, sha256, meta["pages"],
+            meta["title"], meta["author"], meta["creator"], uploaded_at,
+            json.dumps(extracted_data), 1, "[]", uploaded_at, uploaded_at,
+        ),
+    )
+    db.commit()
+    pending_id = cur.lastrowid
+
+    # Generate the draft PDF report the reviewer will download and read.
+    report_available = False
+    try:
+        row = db.execute("SELECT * FROM pending_reviews WHERE id = ?", (pending_id,)).fetchone()
+        _build_pending_report(db, row)
+        report_available = True
+    except Exception as exc:
+        print(f"[WARNING] Could not generate PDF report for pending entry #{pending_id}: {exc}")
+
+    return jsonify({
+        "id":                pending_id,
+        "status":            "pending_review",
+        "filename":          safe_name,
+        "file_size":         file_size,
+        "pages":             meta["pages"],
+        "uploaded_at":       uploaded_at,
+        "company_name":      extracted_data.get("company_name"),
+        "fiscal_quarter":    extracted_data.get("fiscal_quarter"),
+        "fiscal_year":       extracted_data.get("fiscal_year"),
+        "confidence_score":  extracted_data.get("confidence_score"),
+        "analysis_error":    extracted_data.get("analysis_error"),
+        "attempt_count":     1,
+        "extra_instructions": [],
+        "report_available":  report_available,
+        "report_url":        f"/pending/{pending_id}/report",
+        "message": (
+            "Review report generated. Download and read it, then approve or fail "
+            "the evaluation — figures are not saved until approved."
+        ),
+    }), 201
+
+
+@app.route("/pending", methods=["GET"])
+def list_pending():
+    """List uploads awaiting review. Only identification fields are exposed
+    here — the reviewer is expected to open the PDF report to see the full
+    extracted figures and commentary before deciding."""
+    db = get_db()
+    rows = db.execute("SELECT * FROM pending_reviews ORDER BY id DESC").fetchall()
+    result = []
+    for r in rows:
+        extracted_data = json.loads(r["extracted_data"])
+        result.append({
+            "id":                 r["id"],
+            "filename":           r["filename"],
+            "pages":              r["pages"],
+            "uploaded_at":        r["uploaded_at"],
+            "company_name":       extracted_data.get("company_name"),
+            "fiscal_quarter":     extracted_data.get("fiscal_quarter"),
+            "fiscal_year":        extracted_data.get("fiscal_year"),
+            "confidence_score":   extracted_data.get("confidence_score"),
+            "analysis_error":     extracted_data.get("analysis_error"),
+            "attempt_count":      r["attempt_count"],
+            "extra_instructions": json.loads(r["extra_instructions"] or "[]"),
+            "downloaded":         bool(r["downloaded_at"]),
+            "report_available":   bool(r["report_path"]),
+        })
+    return jsonify(result)
+
+
+@app.route("/pending/<int:pending_id>/report", methods=["GET"])
+def download_pending_report(pending_id):
+    db = get_db()
+    row = db.execute("SELECT * FROM pending_reviews WHERE id = ?", (pending_id,)).fetchone()
+    if not row:
+        return jsonify({"error": "Not found"}), 404
+
+    report_path = row["report_path"]
+    if not report_path or not os.path.exists(report_path):
+        try:
+            report_path = _build_pending_report(db, row)
+        except Exception as exc:
+            return jsonify({"error": f"Could not generate report: {exc}"}), 500
+
+    # Record that the report has been downloaded — approve/reject require
+    # this so a decision can't be made without the human opening the PDF.
+    db.execute(
+        "UPDATE pending_reviews SET downloaded_at = ? WHERE id = ?",
+        (datetime.utcnow().isoformat(timespec="seconds") + "Z", pending_id),
+    )
+    db.commit()
+
+    extracted_data = json.loads(row["extracted_data"])
+    company = (extracted_data.get("company_name") or "pending").strip().replace(" ", "_") or "pending"
+    period = "".join(filter(None, [extracted_data.get("fiscal_quarter"), str(extracted_data.get("fiscal_year") or "")]))
+    download_name = f"{company}_{period}_DRAFT_review.pdf" if period else f"{company}_DRAFT_review.pdf"
+
+    return send_file(report_path, as_attachment=True, download_name=download_name)
+
+
+@app.route("/pending/<int:pending_id>/approve", methods=["POST"])
+def approve_pending(pending_id):
+    """Approve a reviewed evaluation: only now do the extracted figures and
+    text get written to pdf_metadata (the database of record)."""
+    db = get_db()
+    row = db.execute("SELECT * FROM pending_reviews WHERE id = ?", (pending_id,)).fetchone()
+    if not row:
+        return jsonify({"error": "Not found"}), 404
+
+    if not row["downloaded_at"]:
+        return jsonify({
+            "error": "not_reviewed",
+            "message": "Download and review the report before approving.",
+        }), 400
+
+    extracted_data = json.loads(row["extracted_data"])
+    validation_warnings_json = (
+        json.dumps(extracted_data["validation_warnings"])
+        if extracted_data.get("validation_warnings") else None
+    )
 
     cur = db.execute(
         """INSERT INTO pdf_metadata (
@@ -589,62 +1060,173 @@ def upload():
                revenue_qoq, revenue_yoy, pbt_qoq, pbt_yoy
            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
-            safe_name, file_size, sha256, meta["pages"],
-            meta["title"], meta["author"], meta["creator"], uploaded_at,
-            analysis.get("company_name"),
-            analysis.get("quarter_end_date"),
-            analysis.get("fiscal_quarter"),
-            analysis.get("fiscal_year"),
-            analysis.get("currency"),
-            analysis.get("unit_raw"),
-            analysis.get("revenue_current"),
-            analysis.get("revenue_previous_quarter"),
-            analysis.get("revenue_same_quarter_last_year"),
-            analysis.get("pbt_current"),
-            analysis.get("pbt_previous_quarter"),
-            analysis.get("pbt_same_quarter_last_year"),
-            analysis.get("management_commentary"),
-            analysis.get("outlook_summary"),
-            analysis.get("confidence_score"),
-            analysis_error,
+            row["filename"], row["file_size"], row["sha256"], row["pages"],
+            row["title"], row["author"], row["creator"], row["uploaded_at"],
+            extracted_data.get("company_name"),
+            extracted_data.get("quarter_end_date"),
+            extracted_data.get("fiscal_quarter"),
+            extracted_data.get("fiscal_year"),
+            extracted_data.get("currency"),
+            extracted_data.get("unit_raw"),
+            extracted_data.get("revenue_current"),
+            extracted_data.get("revenue_previous_quarter"),
+            extracted_data.get("revenue_same_quarter_last_year"),
+            extracted_data.get("pbt_current"),
+            extracted_data.get("pbt_previous_quarter"),
+            extracted_data.get("pbt_same_quarter_last_year"),
+            extracted_data.get("management_commentary"),
+            extracted_data.get("outlook_summary"),
+            extracted_data.get("confidence_score"),
+            extracted_data.get("analysis_error"),
             validation_warnings_json,
-            growth["revenue_qoq"],
-            growth["revenue_yoy"],
-            growth["pbt_qoq"],
-            growth["pbt_yoy"],
+            extracted_data.get("revenue_qoq"),
+            extracted_data.get("revenue_yoy"),
+            extracted_data.get("pbt_qoq"),
+            extracted_data.get("pbt_yoy"),
         ),
     )
     db.commit()
-    row_id = cur.lastrowid
+    new_id = cur.lastrowid
+
+    report_available = False
+    try:
+        new_row = db.execute("SELECT * FROM pdf_metadata WHERE id = ?", (new_id,)).fetchone()
+        _build_report_for_row(db, new_row)
+        report_available = True
+    except Exception as exc:
+        print(f"[WARNING] Could not generate final PDF report for entry #{new_id}: {exc}")
+
+    # Clean up the draft report and the pending record now it's been promoted
+    if row["report_path"] and os.path.exists(row["report_path"]):
+        os.remove(row["report_path"])
+    db.execute("DELETE FROM pending_reviews WHERE id = ?", (pending_id,))
+    db.commit()
 
     return jsonify({
-        "id":                             row_id,
-        "filename":                       safe_name,
-        "file_size":                      file_size,
-        "pages":                          meta["pages"],
-        "uploaded_at":                    uploaded_at,
-        "company_name":                   analysis.get("company_name"),
-        "quarter_end_date":               analysis.get("quarter_end_date"),
-        "fiscal_quarter":                 analysis.get("fiscal_quarter"),
-        "fiscal_year":                    analysis.get("fiscal_year"),
-        "currency":                       analysis.get("currency"),
-        "unit_raw":                       analysis.get("unit_raw"),
-        "revenue_current":                analysis.get("revenue_current"),
-        "revenue_previous_quarter":       analysis.get("revenue_previous_quarter"),
-        "revenue_same_quarter_last_year": analysis.get("revenue_same_quarter_last_year"),
-        "pbt_current":                    analysis.get("pbt_current"),
-        "pbt_previous_quarter":           analysis.get("pbt_previous_quarter"),
-        "pbt_same_quarter_last_year":     analysis.get("pbt_same_quarter_last_year"),
-        "management_commentary":          analysis.get("management_commentary"),
-        "outlook_summary":                analysis.get("outlook_summary"),
-        "confidence_score":               analysis.get("confidence_score"),
-        "analysis_error":                 analysis_error,
-        "validation_warnings":            warnings if warnings else None,
-        "revenue_qoq":                    growth["revenue_qoq"],
-        "revenue_yoy":                    growth["revenue_yoy"],
-        "pbt_qoq":                        growth["pbt_qoq"],
-        "pbt_yoy":                        growth["pbt_yoy"],
+        "id":                             new_id,
+        "status":                         "approved",
+        "report_available":               report_available,
+        "filename":                       row["filename"],
+        "file_size":                      row["file_size"],
+        "pages":                          row["pages"],
+        "uploaded_at":                    row["uploaded_at"],
+        "company_name":                   extracted_data.get("company_name"),
+        "quarter_end_date":               extracted_data.get("quarter_end_date"),
+        "fiscal_quarter":                 extracted_data.get("fiscal_quarter"),
+        "fiscal_year":                    extracted_data.get("fiscal_year"),
+        "currency":                       extracted_data.get("currency"),
+        "unit_raw":                       extracted_data.get("unit_raw"),
+        "revenue_current":                extracted_data.get("revenue_current"),
+        "revenue_previous_quarter":       extracted_data.get("revenue_previous_quarter"),
+        "revenue_same_quarter_last_year": extracted_data.get("revenue_same_quarter_last_year"),
+        "pbt_current":                    extracted_data.get("pbt_current"),
+        "pbt_previous_quarter":           extracted_data.get("pbt_previous_quarter"),
+        "pbt_same_quarter_last_year":     extracted_data.get("pbt_same_quarter_last_year"),
+        "management_commentary":          extracted_data.get("management_commentary"),
+        "outlook_summary":                extracted_data.get("outlook_summary"),
+        "confidence_score":               extracted_data.get("confidence_score"),
+        "analysis_error":                 extracted_data.get("analysis_error"),
+        "validation_warnings":            extracted_data.get("validation_warnings"),
+        "revenue_qoq":                    extracted_data.get("revenue_qoq"),
+        "revenue_yoy":                    extracted_data.get("revenue_yoy"),
+        "pbt_qoq":                        extracted_data.get("pbt_qoq"),
+        "pbt_yoy":                        extracted_data.get("pbt_yoy"),
     }), 201
+
+
+@app.route("/pending/<int:pending_id>/reject", methods=["POST"])
+def reject_pending(pending_id):
+    """Fail an evaluation: rerun the LLM extraction — optionally steered by
+    reviewer-supplied instructions — and regenerate the report. Nothing is
+    saved to pdf_metadata; the entry stays pending awaiting another review."""
+    db = get_db()
+    row = db.execute("SELECT * FROM pending_reviews WHERE id = ?", (pending_id,)).fetchone()
+    if not row:
+        return jsonify({"error": "Not found"}), 404
+
+    if not row["downloaded_at"]:
+        return jsonify({
+            "error": "not_reviewed",
+            "message": "Download and review the report before failing the evaluation.",
+        }), 400
+
+    body = request.get_json(silent=True) or {}
+    new_instruction = (body.get("instructions") or "").strip()
+
+    extra_instructions = json.loads(row["extra_instructions"] or "[]")
+    if new_instruction:
+        extra_instructions.append(new_instruction)
+
+    save_path = os.path.join(UPLOAD_FOLDER, row["filename"])
+    if not os.path.exists(save_path):
+        return jsonify({"error": f"Source file '{row['filename']}' is missing on disk — cannot rerun."}), 500
+
+    combined_instructions = "\n".join(f"- {s}" for s in extra_instructions) if extra_instructions else None
+
+    next_attempt = row["attempt_count"] + 1
+    print(f"\n[INFO] Rerunning GPT-4o-mini analysis for pending #{pending_id} "
+          f"(attempt {next_attempt}) with reviewer instructions: {extra_instructions}")
+    pdf_text = extract_pdf_text(save_path)
+    extracted_data = _run_llm_pipeline(pdf_text, db, extra_instructions=combined_instructions)
+
+    print("\n" + "=" * 50)
+    print(f"GPT-4o-mini Earnings Analysis — rerun (attempt {next_attempt}, still pending review)")
+    print("=" * 50)
+    print(json.dumps(extracted_data, indent=2, ensure_ascii=False))
+    print("=" * 50 + "\n")
+
+    now = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+    db.execute(
+        """UPDATE pending_reviews
+           SET extracted_data = ?, attempt_count = ?,
+               extra_instructions = ?, downloaded_at = NULL, updated_at = ?
+           WHERE id = ?""",
+        (json.dumps(extracted_data), next_attempt, json.dumps(extra_instructions), now, pending_id),
+    )
+    db.commit()
+
+    row = db.execute("SELECT * FROM pending_reviews WHERE id = ?", (pending_id,)).fetchone()
+    report_available = False
+    try:
+        _build_pending_report(db, row)
+        report_available = True
+    except Exception as exc:
+        print(f"[WARNING] Could not regenerate PDF report for pending entry #{pending_id}: {exc}")
+
+    return jsonify({
+        "id":                 pending_id,
+        "status":             "pending_review",
+        "attempt_count":      next_attempt,
+        "extra_instructions": extra_instructions,
+        "company_name":       extracted_data.get("company_name"),
+        "fiscal_quarter":     extracted_data.get("fiscal_quarter"),
+        "fiscal_year":        extracted_data.get("fiscal_year"),
+        "confidence_score":   extracted_data.get("confidence_score"),
+        "analysis_error":     extracted_data.get("analysis_error"),
+        "report_available":   report_available,
+        "report_url":         f"/pending/{pending_id}/report",
+        "message": "Evaluation failed — re-run complete. Download and review the new report.",
+    }), 200
+
+
+@app.route("/pending/<int:pending_id>", methods=["DELETE"])
+def delete_pending(pending_id):
+    """Discard a pending upload entirely (e.g. wrong file) without ever
+    saving anything to pdf_metadata."""
+    db = get_db()
+    row = db.execute(
+        "SELECT filename, report_path FROM pending_reviews WHERE id = ?", (pending_id,)
+    ).fetchone()
+    if not row:
+        return jsonify({"error": "Not found"}), 404
+    path = os.path.join(UPLOAD_FOLDER, row["filename"])
+    if os.path.exists(path):
+        os.remove(path)
+    if row["report_path"] and os.path.exists(row["report_path"]):
+        os.remove(row["report_path"])
+    db.execute("DELETE FROM pending_reviews WHERE id = ?", (pending_id,))
+    db.commit()
+    return jsonify({"deleted": pending_id})
 
 
 @app.route("/pdfs", methods=["GET"])
@@ -657,19 +1239,48 @@ def list_pdfs():
         # Deserialise validation_warnings from JSON string back to a list
         raw_warnings = row.get("validation_warnings")
         row["validation_warnings"] = json.loads(raw_warnings) if raw_warnings else None
+        # Don't leak the server-side filesystem path — expose availability instead
+        report_path = row.pop("report_path", None)
+        row["report_available"] = bool(report_path)
         result.append(row)
     return jsonify(result)
+
+
+@app.route("/pdfs/<int:pdf_id>/report", methods=["GET"])
+def download_report(pdf_id):
+    db = get_db()
+    row = db.execute("SELECT * FROM pdf_metadata WHERE id = ?", (pdf_id,)).fetchone()
+    if not row:
+        return jsonify({"error": "Not found"}), 404
+
+    report_path = row["report_path"]
+    if not report_path or not os.path.exists(report_path):
+        # Older entries (or a previous generation failure) — build it on demand
+        try:
+            report_path = _build_report_for_row(db, row)
+        except Exception as exc:
+            return jsonify({"error": f"Could not generate report: {exc}"}), 500
+
+    company = (row["company_name"] or "earnings").strip().replace(" ", "_") or "earnings"
+    period = "".join(filter(None, [row["fiscal_quarter"], str(row["fiscal_year"] or "")]))
+    download_name = f"{company}_{period}_review.pdf" if period else f"{company}_review.pdf"
+
+    return send_file(report_path, as_attachment=True, download_name=download_name)
 
 
 @app.route("/pdfs/<int:pdf_id>", methods=["DELETE"])
 def delete_pdf(pdf_id):
     db = get_db()
-    row = db.execute("SELECT filename FROM pdf_metadata WHERE id = ?", (pdf_id,)).fetchone()
+    row = db.execute(
+        "SELECT filename, report_path FROM pdf_metadata WHERE id = ?", (pdf_id,)
+    ).fetchone()
     if not row:
         return jsonify({"error": "Not found"}), 404
     path = os.path.join(UPLOAD_FOLDER, row["filename"])
     if os.path.exists(path):
         os.remove(path)
+    if row["report_path"] and os.path.exists(row["report_path"]):
+        os.remove(row["report_path"])
     db.execute("DELETE FROM pdf_metadata WHERE id = ?", (pdf_id,))
     db.commit()
     return jsonify({"deleted": pdf_id})
