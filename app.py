@@ -164,6 +164,8 @@ def generate_report_pdf(data: dict, out_path: str) -> None:
         ["Extraction confidence", conf_text],
         ["Uploaded",              data.get("uploaded_at") or "—"],
     ]
+    if data.get("attempt_count"):
+        meta_rows.insert(-1, ["Extraction attempt", str(data["attempt_count"])])
     meta_table = Table(meta_rows, colWidths=[1.8 * inch, 4.2 * inch])
     meta_table.setStyle(TableStyle([
         ("FONTSIZE", (0, 0), (-1, -1), 9),
@@ -465,12 +467,19 @@ Extract structured data from the provided report text and return ONLY a valid JS
 Rules:
 - ALL monetary values must be normalised to millions of the reported currency, regardless of how they appear in the document (e.g. if the report states values in thousands, multiply by 0.001; if in billions, multiply by 1000).
 - Record the original unit label from the document in unit_raw so the normalisation can be verified.
+- For revenue, extract the broadest consolidated/group revenue figure for the quarter. If a table contains component rows and a "Total revenue" row, use "Total revenue".
+- Do NOT use component rows such as "Revenue as reported above - Continuing operations", segment revenue, operating revenue, or revenue excluding joint ventures when a broader group/consolidated total revenue row is present.
+- If a revenue note says revenue includes share of joint venture companies' revenue, use the row that includes that share, normally "Total revenue".
+- Prefer group/consolidated totals over company-only, segment-only, continuing-operations-only, or subtotal rows unless the report clearly states the subtotal is the primary reported revenue metric.
+- When a table has both "Individual Quarter" and "Cumulative Period" sections, use "Individual Quarter" for current-quarter and same-quarter-last-year fields. Do not use cumulative period values for quarterly fields.
+- For PBT, use the group/consolidated profit before tax / profit before taxation figure for the quarter. Do not use profit after tax, EBITDA, operating profit, segment profit, or cumulative period profit for PBT.
+- previous_quarter fields mean the immediately preceding fiscal quarter only (e.g. Q2 uses Q1 of the same fiscal year). Do NOT copy prior-year "Individual Quarter" or same-quarter-last-year comparative columns into previous_quarter fields. If the report does not explicitly show the immediately preceding quarter, use null.
 - If a field cannot be determined from the text, use null. Do NOT fabricate or estimate values.
 - Return ONLY the JSON object — no markdown, no extra text."""
 
 
 def analyse_earnings(pdf_text: str, extra_instructions: str | None = None) -> dict:
-    """Call GPT-4o-mini to extract structured earnings data from PDF text.
+    """Call GPT-5.4-mini to extract structured earnings data from PDF text.
 
     `extra_instructions`, when provided, is reviewer-supplied guidance from a
     failed evaluation re-run (e.g. "the currency is EUR not USD") that gets
@@ -505,7 +514,7 @@ def analyse_earnings(pdf_text: str, extra_instructions: str | None = None) -> di
             )
 
         response = client.chat.completions.create(
-            model="gpt-4o-mini",
+            model="gpt-5.4-mini",
             response_format={"type": "json_object"},
             temperature=0,
             messages=[
@@ -542,19 +551,23 @@ def pct_change(current, prior) -> float | None:
     return round(((current - prior) / abs(prior)) * 100, 2)
 
 
-def compute_qoq_yoy(analysis: dict, db) -> dict:
-    """Calculate revenue and PBT QoQ / YoY growth rates.
+def compute_qoq_yoy(analysis: dict, db, *, log_matches: bool = True) -> dict:
+    """Calculate comparison values and revenue/PBT QoQ/YoY growth rates.
 
-    Lookup priority for comparison values:
-      1. DB — a previous upload for the same company / quarter / year
-      2. Fallback — comparative figures already extracted from the current report
-      3. null — if neither source has the data
+    Previous-quarter values are DB-only. Quarterly reports often show
+    "Individual Quarter" comparatives for the same quarter last year; those
+    must never be treated as the prior quarter. Same-quarter-last-year values
+    may fall back to the current report when no approved DB row exists.
     """
     result = {
-        "revenue_qoq": None,
-        "revenue_yoy": None,
-        "pbt_qoq":     None,
-        "pbt_yoy":     None,
+        "revenue_previous_quarter":       None,
+        "pbt_previous_quarter":           None,
+        "revenue_same_quarter_last_year": None,
+        "pbt_same_quarter_last_year":     None,
+        "revenue_qoq":                    None,
+        "revenue_yoy":                    None,
+        "pbt_qoq":                        None,
+        "pbt_yoy":                        None,
     }
 
     if analysis.get("analysis_error"):
@@ -562,9 +575,14 @@ def compute_qoq_yoy(analysis: dict, db) -> dict:
 
     company     = analysis.get("company_name")
     fq          = analysis.get("fiscal_quarter")
-    fy          = analysis.get("fiscal_year")
+    fy_raw      = analysis.get("fiscal_year")
     rev_current = analysis.get("revenue_current")
     pbt_current = analysis.get("pbt_current")
+
+    try:
+        fy = int(fy_raw) if fy_raw is not None else None
+    except (TypeError, ValueError):
+        fy = None
 
     # ---- Previous quarter ----
     rev_prev = pbt_prev = None
@@ -583,14 +601,11 @@ def compute_qoq_yoy(analysis: dict, db) -> dict:
         if row:
             rev_prev = row["revenue_current"]
             pbt_prev = row["pbt_current"]
-            print(f"[QoQ] DB match: {company} {pq} {py}")
+            if log_matches:
+                print(f"[QoQ] DB match: {company} {pq} {py}")
 
-    # Fallback to LLM-extracted comparative figures
-    if rev_prev is None:
-        rev_prev = analysis.get("revenue_previous_quarter")
-    if pbt_prev is None:
-        pbt_prev = analysis.get("pbt_previous_quarter")
-
+    result["revenue_previous_quarter"] = rev_prev
+    result["pbt_previous_quarter"] = pbt_prev
     result["revenue_qoq"] = pct_change(rev_current, rev_prev)
     result["pbt_qoq"]     = pct_change(pbt_current, pbt_prev)
 
@@ -609,7 +624,8 @@ def compute_qoq_yoy(analysis: dict, db) -> dict:
         if row:
             rev_ly = row["revenue_current"]
             pbt_ly = row["pbt_current"]
-            print(f"[YoY] DB match: {company} {fq} {fy - 1}")
+            if log_matches:
+                print(f"[YoY] DB match: {company} {fq} {fy - 1}")
 
     # Fallback to LLM-extracted comparative figures
     if rev_ly is None:
@@ -617,10 +633,75 @@ def compute_qoq_yoy(analysis: dict, db) -> dict:
     if pbt_ly is None:
         pbt_ly = analysis.get("pbt_same_quarter_last_year")
 
+    result["revenue_same_quarter_last_year"] = rev_ly
+    result["pbt_same_quarter_last_year"] = pbt_ly
     result["revenue_yoy"] = pct_change(rev_current, rev_ly)
     result["pbt_yoy"]     = pct_change(pbt_current, pbt_ly)
 
     return result
+
+
+def _apply_comparison_data(data: dict, db) -> dict:
+    """Return data with DB-derived comparison values and growth rates applied."""
+    refreshed = dict(data)
+    comparisons = compute_qoq_yoy(refreshed, db, log_matches=False)
+    for field, value in comparisons.items():
+        refreshed[field] = value
+    return refreshed
+
+
+COMPARISON_FIELDS = [
+    "revenue_previous_quarter",
+    "pbt_previous_quarter",
+    "revenue_same_quarter_last_year",
+    "pbt_same_quarter_last_year",
+    "revenue_qoq",
+    "revenue_yoy",
+    "pbt_qoq",
+    "pbt_yoy",
+]
+
+
+def _refresh_approved_comparisons(db) -> int:
+    """Backfill comparison values for approved reports after new approvals.
+
+    This handles out-of-order uploads: if Q3 is approved before Q2, approving
+    Q2 later can fill Q3's previously missing QoQ values.
+    """
+    rows = db.execute("SELECT * FROM pdf_metadata ORDER BY id").fetchall()
+    updated = 0
+    for row in rows:
+        data = dict(row)
+        comparisons = compute_qoq_yoy(data, db, log_matches=False)
+        if not any(data.get(field) != comparisons.get(field) for field in COMPARISON_FIELDS):
+            continue
+        db.execute(
+            """UPDATE pdf_metadata
+               SET revenue_previous_quarter = ?,
+                   pbt_previous_quarter = ?,
+                   revenue_same_quarter_last_year = ?,
+                   pbt_same_quarter_last_year = ?,
+                   revenue_qoq = ?,
+                   revenue_yoy = ?,
+                   pbt_qoq = ?,
+                   pbt_yoy = ?
+               WHERE id = ?""",
+            (
+                comparisons["revenue_previous_quarter"],
+                comparisons["pbt_previous_quarter"],
+                comparisons["revenue_same_quarter_last_year"],
+                comparisons["pbt_same_quarter_last_year"],
+                comparisons["revenue_qoq"],
+                comparisons["revenue_yoy"],
+                comparisons["pbt_qoq"],
+                comparisons["pbt_yoy"],
+                data["id"],
+            ),
+        )
+        updated += 1
+    if updated:
+        db.commit()
+    return updated
 
 
 # ---------- Extraction pipeline (review-gated) ----------
@@ -642,6 +723,10 @@ def _package_extracted_data(analysis: dict, analysis_error, warnings: list, grow
     to be written straight to the DB — but now this is only ever persisted
     inside pending_reviews.extracted_data until a reviewer approves it."""
     data = {field: analysis.get(field) for field in EXTRACTED_FIELDS}
+    data["revenue_previous_quarter"]       = growth["revenue_previous_quarter"]
+    data["pbt_previous_quarter"]           = growth["pbt_previous_quarter"]
+    data["revenue_same_quarter_last_year"] = growth["revenue_same_quarter_last_year"]
+    data["pbt_same_quarter_last_year"]     = growth["pbt_same_quarter_last_year"]
     data["analysis_error"]      = analysis_error
     data["validation_warnings"] = warnings if warnings else None
     data["revenue_qoq"]         = growth["revenue_qoq"]
@@ -657,9 +742,12 @@ def _run_llm_pipeline(pdf_text: str, db, extra_instructions: str | None = None) 
     any reviewer-triggered rerun."""
     analysis = analyse_earnings(pdf_text, extra_instructions=extra_instructions)
     analysis_error = analysis.get("analysis_error")
-    warnings = [] if analysis_error else validate_analysis(analysis)
     growth = compute_qoq_yoy(analysis, db)
-    return _package_extracted_data(analysis, analysis_error, warnings, growth)
+    data = _package_extracted_data(analysis, analysis_error, [], growth)
+    if not analysis_error:
+        warnings = validate_analysis(data)
+        data["validation_warnings"] = warnings if warnings else None
+    return data
 
 
 # ---------- Flask app ----------
@@ -674,12 +762,14 @@ os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 os.makedirs(REPORTS_FOLDER, exist_ok=True)
 
 
-def _row_to_report_data(row: sqlite3.Row) -> dict:
+def _row_to_report_data(row: sqlite3.Row, db=None) -> dict:
     """Convert a pdf_metadata DB row into the plain dict shape expected by
     generate_report_pdf (validation_warnings deserialised into a list)."""
     d = dict(row)
     raw_warnings = d.get("validation_warnings")
     d["validation_warnings"] = json.loads(raw_warnings) if raw_warnings else None
+    if db is not None:
+        d = _apply_comparison_data(d, db)
     return d
 
 
@@ -687,7 +777,7 @@ def _build_report_for_row(db, row: sqlite3.Row) -> str:
     """Generate (or re-generate) the PDF review report for an APPROVED
     pdf_metadata row and persist its path on the record. Returns the
     absolute file path."""
-    data = _row_to_report_data(row)
+    data = _row_to_report_data(row, db)
     report_path = os.path.join(REPORTS_FOLDER, f"report_{row['id']}.pdf")
     generate_report_pdf(data, report_path)
     db.execute("UPDATE pdf_metadata SET report_path = ? WHERE id = ?", (report_path, row["id"]))
@@ -704,6 +794,8 @@ def _build_pending_report(db, row: sqlite3.Row) -> str:
     payload["filename"]    = row["filename"]
     payload["pages"]       = row["pages"]
     payload["uploaded_at"] = row["uploaded_at"]
+    payload["attempt_count"] = row["attempt_count"]
+    payload = _apply_comparison_data(payload, db)
     report_path = os.path.join(REPORTS_FOLDER, f"pending_{row['id']}.pdf")
     generate_report_pdf(payload, report_path)
     db.execute("UPDATE pending_reviews SET report_path = ? WHERE id = ?", (report_path, row["id"]))
@@ -763,6 +855,7 @@ def close_connection(exception):
 def init_db():
     with app.app_context():
         db = sqlite3.connect(DB_PATH)
+        db.row_factory = sqlite3.Row
         db.execute("""
             CREATE TABLE IF NOT EXISTS pdf_metadata (
                 id                    INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -835,6 +928,10 @@ def init_db():
                     print(f"[DB] Added column: {col_name}")
                 except sqlite3.OperationalError as e:
                     print(f"[DB] Could not add column {col_name}: {e}")
+
+        refreshed = _refresh_approved_comparisons(db)
+        if refreshed:
+            print(f"[DB] Refreshed comparison fields for {refreshed} approved report(s)")
 
         db.close()
 
@@ -912,13 +1009,13 @@ def upload():
     meta = get_pdf_metadata(save_path)
     uploaded_at = datetime.utcnow().isoformat(timespec="seconds") + "Z"
 
-    # GPT-4o-mini earnings analysis
-    print(f"\n[INFO] Starting GPT-4o-mini analysis for: {safe_name}")
+    # GPT-5.4-mini earnings analysis
+    print(f"\n[INFO] Starting GPT-5.4-mini analysis for: {safe_name}")
     pdf_text = extract_pdf_text(save_path)
     extracted_data = _run_llm_pipeline(pdf_text, db)
 
     print("\n" + "=" * 50)
-    print("GPT-4o-mini Earnings Analysis — PENDING REVIEW (not yet saved to the database)")
+    print("GPT-5.4-mini Earnings Analysis — PENDING REVIEW (not yet saved to the database)")
     print("=" * 50)
     print(json.dumps(extracted_data, indent=2, ensure_ascii=False))
     print("=" * 50 + "\n")
@@ -1004,12 +1101,10 @@ def download_pending_report(pending_id):
     if not row:
         return jsonify({"error": "Not found"}), 404
 
-    report_path = row["report_path"]
-    if not report_path or not os.path.exists(report_path):
-        try:
-            report_path = _build_pending_report(db, row)
-        except Exception as exc:
-            return jsonify({"error": f"Could not generate report: {exc}"}), 500
+    try:
+        report_path = _build_pending_report(db, row)
+    except Exception as exc:
+        return jsonify({"error": f"Could not generate report: {exc}"}), 500
 
     # Record that the report has been downloaded — approve/reject require
     # this so a decision can't be made without the human opening the PDF.
@@ -1022,9 +1117,15 @@ def download_pending_report(pending_id):
     extracted_data = json.loads(row["extracted_data"])
     company = (extracted_data.get("company_name") or "pending").strip().replace(" ", "_") or "pending"
     period = "".join(filter(None, [extracted_data.get("fiscal_quarter"), str(extracted_data.get("fiscal_year") or "")]))
-    download_name = f"{company}_{period}_DRAFT_review.pdf" if period else f"{company}_DRAFT_review.pdf"
+    attempt = row["attempt_count"]
+    suffix = f"pending{pending_id}_attempt{attempt}_DRAFT_review.pdf"
+    download_name = f"{company}_{period}_{suffix}" if period else f"{company}_{suffix}"
 
-    return send_file(report_path, as_attachment=True, download_name=download_name)
+    response = send_file(report_path, as_attachment=True, download_name=download_name, max_age=0)
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["Expires"] = "0"
+    return response
 
 
 @app.route("/pending/<int:pending_id>/approve", methods=["POST"])
@@ -1042,7 +1143,10 @@ def approve_pending(pending_id):
             "message": "Download and review the report before approving.",
         }), 400
 
-    extracted_data = json.loads(row["extracted_data"])
+    extracted_data = _apply_comparison_data(json.loads(row["extracted_data"]), db)
+    if not extracted_data.get("analysis_error"):
+        warnings = validate_analysis(extracted_data)
+        extracted_data["validation_warnings"] = warnings if warnings else None
     validation_warnings_json = (
         json.dumps(extracted_data["validation_warnings"])
         if extracted_data.get("validation_warnings") else None
@@ -1087,6 +1191,7 @@ def approve_pending(pending_id):
     )
     db.commit()
     new_id = cur.lastrowid
+    _refresh_approved_comparisons(db)
 
     report_available = False
     try:
@@ -1239,6 +1344,7 @@ def list_pdfs():
         # Deserialise validation_warnings from JSON string back to a list
         raw_warnings = row.get("validation_warnings")
         row["validation_warnings"] = json.loads(raw_warnings) if raw_warnings else None
+        row = _apply_comparison_data(row, db)
         # Don't leak the server-side filesystem path — expose availability instead
         report_path = row.pop("report_path", None)
         row["report_available"] = bool(report_path)
@@ -1253,19 +1359,21 @@ def download_report(pdf_id):
     if not row:
         return jsonify({"error": "Not found"}), 404
 
-    report_path = row["report_path"]
-    if not report_path or not os.path.exists(report_path):
-        # Older entries (or a previous generation failure) — build it on demand
-        try:
-            report_path = _build_report_for_row(db, row)
-        except Exception as exc:
-            return jsonify({"error": f"Could not generate report: {exc}"}), 500
+    try:
+        report_path = _build_report_for_row(db, row)
+    except Exception as exc:
+        return jsonify({"error": f"Could not generate report: {exc}"}), 500
 
     company = (row["company_name"] or "earnings").strip().replace(" ", "_") or "earnings"
     period = "".join(filter(None, [row["fiscal_quarter"], str(row["fiscal_year"] or "")]))
-    download_name = f"{company}_{period}_review.pdf" if period else f"{company}_review.pdf"
+    suffix = f"entry{pdf_id}_review.pdf"
+    download_name = f"{company}_{period}_{suffix}" if period else f"{company}_{suffix}"
 
-    return send_file(report_path, as_attachment=True, download_name=download_name)
+    response = send_file(report_path, as_attachment=True, download_name=download_name, max_age=0)
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["Expires"] = "0"
+    return response
 
 
 @app.route("/pdfs/<int:pdf_id>", methods=["DELETE"])
