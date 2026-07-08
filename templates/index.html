@@ -209,6 +209,37 @@
     }
     .btn-discard:hover { background: #f1f5f9; }
 
+    /* Evaluation harness */
+    .btn-run-eval {
+      background: #3b82f6;
+      color: #fff;
+      border: none;
+      cursor: pointer;
+      padding: 0.45rem 0.9rem;
+      border-radius: 8px;
+      font-size: 0.85rem;
+      font-weight: 600;
+      display: inline-flex;
+      align-items: center;
+      gap: 0.4rem;
+    }
+    .btn-run-eval:hover { background: #2563eb; }
+    .btn-run-eval:disabled { opacity: 0.6; cursor: not-allowed; }
+
+    #eval-results-wrap { padding: 1.25rem 1.5rem; }
+    .eval-summary-table { width: 100%; border-collapse: collapse; font-size: 0.875rem; }
+    .eval-summary-table th {
+      text-align: left; padding: 0.5rem; font-size: 0.75rem; text-transform: uppercase;
+      letter-spacing: 0.05em; color: #64748b;
+    }
+    .eval-summary-table td { padding: 0.5rem; border-top: 1px solid #f1f5f9; vertical-align: top; }
+    .eval-checks-table { width: 100%; font-size: 0.8rem; margin-top: 0.5rem; border-collapse: collapse; }
+    .eval-checks-table th { text-align: left; padding: 0.25rem 0.5rem; color: #64748b; }
+    .eval-checks-table td { padding: 0.25rem 0.5rem; border-top: 1px solid #f8fafc; }
+    .eval-pass { color: #166534; font-weight: 700; }
+    .eval-fail { color: #991b1b; font-weight: 700; }
+    .eval-details summary { cursor: pointer; color: #3b82f6; font-size: 0.8rem; }
+
     .fail-notes {
       font-size: 0.8rem;
       padding: 0.32rem 0.55rem;
@@ -472,6 +503,21 @@
           </thead>
           <tbody id="pdf-tbody"></tbody>
         </table>
+      </div>
+    </div>
+
+    <div class="card" style="margin-top:1.5rem;">
+      <div class="card-header">
+        <h2>Evaluation Harness</h2>
+        <button id="run-eval-btn" class="btn-run-eval" onclick="runEvaluation()">▶ Run Evaluation Tests</button>
+      </div>
+      <div id="eval-results-wrap">
+        <div class="empty-state" id="eval-empty-state">
+          No evaluation runs yet. Click "Run Evaluation Tests" to run the 5 synthetic PDFs in
+          <code>test_data/</code> through the extraction pipeline and compare against
+          <code>expected_results.json</code>.
+        </div>
+        <div id="eval-summary" style="display:none;"></div>
       </div>
     </div>
   </div>
@@ -911,6 +957,101 @@
       uploadFiles([...fileInput.files]);
       fileInput.value = "";
     });
+
+    // ---- Evaluation harness ----
+    function escapeHtml(str) {
+      if (str == null) return "";
+      return String(str).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+    }
+
+    function renderEvalResults(body) {
+      const wrap = document.getElementById("eval-summary");
+      const overallColor = body.failed === 0 ? "#166534" : "#991b1b";
+      const overallBg = body.failed === 0 ? "#dcfce7" : "#fee2e2";
+
+      let html = `
+        <div style="display:flex;align-items:center;gap:0.75rem;margin-bottom:1rem;flex-wrap:wrap;">
+          <span style="background:${overallBg};color:${overallColor};padding:0.3rem 0.8rem;border-radius:99px;font-weight:700;font-size:0.9rem;">
+            ${body.passed}/${body.total} passed
+          </span>
+          <span style="color:#9ca3af;font-size:0.8rem;">Run at ${fmtDate(body.run_at)}</span>
+          ${body.report_filename ? `<a class="btn-report" href="/eval_results/${body.report_filename}" target="_blank">⬇ Download full results (JSON)</a>` : ""}
+        </div>
+        <table class="eval-summary-table">
+          <thead><tr><th>Result</th><th>Test file</th><th>Category</th><th>Details</th></tr></thead>
+          <tbody>
+      `;
+
+      body.cases.forEach(c => {
+        const icon = c.passed ? `<span class="eval-pass">✓ PASS</span>` : `<span class="eval-fail">✗ FAIL</span>`;
+        const checks = Array.isArray(c.checks) ? c.checks : [];
+        const failedChecks = checks.filter(chk => !chk.passed && !chk.info_only);
+
+        let detailHtml;
+        if (c.error) {
+          detailHtml = `<p style="color:#991b1b;">${escapeHtml(c.error)}</p>`;
+        } else {
+          const rows = checks.map(chk => `
+            <tr>
+              <td>${chk.info_only ? "ℹ" : (chk.passed ? '<span class="eval-pass">✓</span>' : '<span class="eval-fail">✗</span>')}</td>
+              <td>${escapeHtml(chk.field)}</td>
+              <td>${escapeHtml(JSON.stringify(chk.expected))}</td>
+              <td>${escapeHtml(JSON.stringify(chk.actual))}</td>
+            </tr>`).join("");
+          detailHtml = `
+            <table class="eval-checks-table">
+              <thead><tr><th></th><th>Field</th><th>Expected</th><th>Actual</th></tr></thead>
+              <tbody>${rows}</tbody>
+            </table>`;
+        }
+
+        const summaryText = c.error
+          ? "Error — view details"
+          : (c.passed ? "All checks passed" : `${failedChecks.length} check(s) failed — view details`);
+
+        html += `
+          <tr>
+            <td>${icon}</td>
+            <td>${escapeHtml(c.filename)}</td>
+            <td>${escapeHtml(c.category || "—")}</td>
+            <td><details class="eval-details"><summary>${summaryText}</summary>${detailHtml}</details></td>
+          </tr>`;
+      });
+
+      html += `</tbody></table>`;
+      wrap.innerHTML = html;
+    }
+
+    async function runEvaluation() {
+      const btn = document.getElementById("run-eval-btn");
+      const empty = document.getElementById("eval-empty-state");
+      const wrap = document.getElementById("eval-summary");
+
+      btn.disabled = true;
+      const originalText = btn.innerHTML;
+      btn.innerHTML = `<span class="spinner"></span> Running…`;
+      empty.style.display = "none";
+      wrap.style.display = "";
+      wrap.innerHTML = `<p style="color:#6b7280;font-size:0.9rem;">Running the 5 test cases through the extraction pipeline — this calls the LLM for each PDF and can take a minute…</p>`;
+
+      try {
+        const res = await fetch("/evaluate", { method: "POST" });
+        const body = await res.json();
+        if (!res.ok) {
+          showToast(body.error || "Evaluation failed.", "error");
+          wrap.innerHTML = `<p style="color:#991b1b;">${escapeHtml(body.error || "Evaluation failed.")}</p>`;
+          return;
+        }
+        renderEvalResults(body);
+        showToast(`Evaluation complete: ${body.passed}/${body.total} passed.`, body.failed === 0 ? "success" : "warning");
+      } catch {
+        showToast("Network error while running evaluation.", "error");
+        wrap.innerHTML = `<p style="color:#991b1b;">Network error while running evaluation.</p>`;
+      } finally {
+        btn.disabled = false;
+        btn.innerHTML = originalText;
+      }
+    }
 
     // ---- Init ----
     loadPdfs();

@@ -757,9 +757,173 @@ app = Flask(__name__)
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 UPLOAD_FOLDER = os.path.join(BASE_DIR, "uploads")
 REPORTS_FOLDER = os.path.join(BASE_DIR, "reports")
+TEST_DATA_FOLDER = os.path.join(BASE_DIR, "test_data")
+EVAL_RESULTS_FOLDER = os.path.join(BASE_DIR, "eval_results")
 DB_PATH = os.path.join(BASE_DIR, "pdfs.db")
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 os.makedirs(REPORTS_FOLDER, exist_ok=True)
+os.makedirs(EVAL_RESULTS_FOLDER, exist_ok=True)
+
+
+# ---------- Evaluation harness ----------
+#
+# Runs the 5 synthetic PDFs in test_data/ straight through the extraction +
+# validation + QoQ/YoY pipeline (bypassing the review-gated DB tables so
+# re-running the suite never collides with the duplicate-upload check) and
+# diffs the output against test_data/expected_results.json.
+
+# A couple of the fixtures are deliberately ambiguous (see test_data/MANIFEST.md,
+# adversarial case 5) — either value is a defensible extraction.
+EVAL_ACCEPTABLE_ALTERNATIVES = {
+    "05_adversarial_TransPacific_Global_Q2_FY2026.pdf": {
+        "currency": ["USD", "SGD"],
+        "fiscal_quarter": ["Q1", "Q2"],
+    },
+}
+
+EVAL_NUMERIC_FIELDS = {
+    "fiscal_year",
+    "revenue_current", "revenue_previous_quarter", "revenue_same_quarter_last_year",
+    "pbt_current", "pbt_previous_quarter", "pbt_same_quarter_last_year",
+}
+
+_EVAL_NUM_RE = re.compile(r"[-+]?\d[\d,]*\.?\d*")
+_EVAL_PAREN_RE = re.compile(r"\s*\([^)]*\)")
+
+
+def _eval_num_close(actual, expected, rel=0.02, abs_tol=0.05) -> bool:
+    if actual is None or expected is None:
+        return actual == expected
+    try:
+        actual, expected = float(actual), float(expected)
+    except (TypeError, ValueError):
+        return False
+    return abs(actual - expected) <= max(abs_tol, abs(expected) * rel)
+
+
+def _eval_normalize_warning(w: str) -> str:
+    """Strip out the specific numbers from a warning so cases whose figures
+    are within tolerance (but not byte-identical) still match on wording."""
+    return _EVAL_NUM_RE.sub("#", w).lower().strip()
+
+
+def _eval_normalize_text(s: str) -> str:
+    """Case/whitespace-fold a text field and drop parenthetical asides, e.g.
+    "Lindqvist Industrial AB (publ)" / "SEK million (MSEK)" — a legal suffix
+    or unit clarification the LLM is free to include or omit. Does NOT strip
+    other punctuation/symbols, since a wrong currency symbol or code in a
+    field like unit_raw is a real discrepancy, not noise."""
+    return " ".join(_EVAL_PAREN_RE.sub("", s).lower().split())
+
+
+def _eval_compare_field(field: str, actual, expected, filename: str):
+    alternatives = EVAL_ACCEPTABLE_ALTERNATIVES.get(filename, {}).get(field)
+    if alternatives:
+        return actual in alternatives, actual, f"one of {alternatives}"
+    if field in EVAL_NUMERIC_FIELDS:
+        return _eval_num_close(actual, expected), actual, expected
+    if actual is None and expected is None:
+        return True, actual, expected
+    if not (isinstance(actual, str) and isinstance(expected, str)):
+        return actual == expected, actual, expected
+    ok = _eval_normalize_text(actual) == _eval_normalize_text(expected)
+    return ok, actual, expected
+
+
+def _evaluate_case(filename: str, expected: dict) -> dict:
+    """Run one test PDF through the pipeline and diff it against its expected
+    result block. Returns a dict with a `passed` flag and a `checks` list."""
+    case = {"filename": filename, "category": expected.get("category"), "checks": [], "passed": True}
+
+    path = os.path.join(TEST_DATA_FOLDER, filename)
+    if not os.path.exists(path):
+        case["passed"] = False
+        case["error"] = f"Test file not found: {filename}"
+        return case
+
+    def record(field, ok, actual, expected_val, info_only=False):
+        case["checks"].append({"field": field, "actual": actual, "expected": expected_val, "passed": ok, "info_only": info_only})
+        if not info_only and not ok:
+            case["passed"] = False
+
+    # ---- PDF metadata (independent of the LLM) ----
+    meta = get_pdf_metadata(path)
+    exp_meta = expected.get("metadata", {})
+    for key in ("title", "author", "creator"):
+        record(f"metadata.{key}", (meta.get(key) or "") == (exp_meta.get(key) or ""), meta.get(key), exp_meta.get(key))
+    record("pages", meta.get("pages") == expected.get("pages"), meta.get("pages"), expected.get("pages"))
+
+    # ---- LLM extraction ----
+    pdf_text = extract_pdf_text(path)
+    analysis = analyse_earnings(pdf_text)
+    if analysis.get("analysis_error"):
+        case["passed"] = False
+        case["error"] = f"LLM analysis failed: {analysis['analysis_error']}"
+        return case
+
+    for field, expected_val in expected.get("expected_extraction", {}).items():
+        if field == "confidence_score":
+            # LLM self-assessed and varies run to run — report only, don't fail on it.
+            record(field, True, analysis.get(field), expected_val, info_only=True)
+            continue
+        ok, act, exp = _eval_compare_field(field, analysis.get(field), expected_val, filename)
+        record(field, ok, act, exp)
+
+    # ---- Validation warnings ----
+    warnings = validate_analysis(analysis)
+    expected_warnings = expected.get("expected_validation_warnings", [])
+    norm_actual = {_eval_normalize_warning(w) for w in warnings}
+    norm_expected = {_eval_normalize_warning(w) for w in expected_warnings}
+    record("validation_warnings", norm_actual == norm_expected, warnings, expected_warnings)
+
+    # ---- QoQ / YoY, computed directly from the report's own comparative
+    # figures (matching how test_data/expected_results.json was generated —
+    # see MANIFEST.md's "empty-DB fallback path" note) ----
+    qoq_yoy = {
+        "revenue_qoq": pct_change(analysis.get("revenue_current"), analysis.get("revenue_previous_quarter")),
+        "revenue_yoy": pct_change(analysis.get("revenue_current"), analysis.get("revenue_same_quarter_last_year")),
+        "pbt_qoq":     pct_change(analysis.get("pbt_current"), analysis.get("pbt_previous_quarter")),
+        "pbt_yoy":     pct_change(analysis.get("pbt_current"), analysis.get("pbt_same_quarter_last_year")),
+    }
+    for field, expected_val in expected.get("expected_qoq_yoy", {}).items():
+        actual_val = qoq_yoy.get(field)
+        ok = _eval_num_close(actual_val, expected_val, rel=0.05, abs_tol=1.0)
+        record(field, ok, actual_val, expected_val)
+
+    return case
+
+
+def run_evaluation() -> dict:
+    """Run every test case in test_data/expected_results.json through the
+    pipeline, write the full results to eval_results/, and return them."""
+    expected_path = os.path.join(TEST_DATA_FOLDER, "expected_results.json")
+    if not os.path.exists(expected_path):
+        raise FileNotFoundError(f"expected_results.json not found in {TEST_DATA_FOLDER}")
+
+    with open(expected_path, "r", encoding="utf-8") as f:
+        expected_all = json.load(f)
+
+    cases = []
+    for filename, expected in expected_all.items():
+        print(f"[EVAL] Running test case: {filename}")
+        cases.append(_evaluate_case(filename, expected))
+
+    now = datetime.utcnow()
+    passed = sum(1 for c in cases if c["passed"])
+    result = {
+        "run_at": now.isoformat(timespec="seconds") + "Z",
+        "total": len(cases),
+        "passed": passed,
+        "failed": len(cases) - passed,
+        "cases": cases,
+    }
+
+    report_filename = f"evaluation_{now.strftime('%Y%m%d_%H%M%S')}.json"
+    with open(os.path.join(EVAL_RESULTS_FOLDER, report_filename), "w", encoding="utf-8") as f:
+        json.dump(result, f, indent=2, ensure_ascii=False)
+    result["report_filename"] = report_filename
+
+    return result
 
 
 def _row_to_report_data(row: sqlite3.Row, db=None) -> dict:
@@ -1392,6 +1556,28 @@ def delete_pdf(pdf_id):
     db.execute("DELETE FROM pdf_metadata WHERE id = ?", (pdf_id,))
     db.commit()
     return jsonify({"deleted": pdf_id})
+
+
+@app.route("/evaluate", methods=["POST"])
+def evaluate():
+    """Run the 5-case synthetic test suite in test_data/ against the live
+    extraction pipeline and write a results file to eval_results/."""
+    try:
+        result = run_evaluation()
+        return jsonify(result), 200
+    except FileNotFoundError as exc:
+        return jsonify({"error": str(exc)}), 404
+    except Exception as exc:
+        return jsonify({"error": f"Evaluation failed: {exc}"}), 500
+
+
+@app.route("/eval_results/<path:filename>", methods=["GET"])
+def download_eval_result(filename):
+    safe_name = os.path.basename(filename)
+    file_path = os.path.join(EVAL_RESULTS_FOLDER, safe_name)
+    if not os.path.exists(file_path):
+        return jsonify({"error": "Not found"}), 404
+    return send_file(file_path, as_attachment=True, download_name=safe_name)
 
 
 # ---------- Main ----------
